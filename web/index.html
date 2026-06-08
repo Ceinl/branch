@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Branch</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header id="docs-topbar" class="docs-topbar">
+        <div class="docs-brand">
+          <button id="docs-home-menu" class="icon-button" type="button" aria-label="Menu"><span></span><span></span><span></span></button>
+          <div class="docs-icon">B</div>
+          <strong>Branch Docs</strong>
+        </div>
+        <label class="search-box">
+          <span>Search</span>
+          <input id="docs-search" type="search" placeholder="Search docs">
+        </label>
+        <div class="docs-root" id="docs-root-path">Loading workspace</div>
+      </header>
+
+      <header id="editor-topbar" class="topbar" hidden>
+        <div class="doc-header">
+          <button id="back-to-docs" class="brand-lockup" type="button">
+            <div class="brand-mark">B</div>
+            <div class="title-stack">
+              <input id="document-title" class="document-title" value="Open a Markdown file" aria-label="Current file path" readonly>
+              <span id="root-path" class="root-path">Loading workspace</span>
+            </div>
+          </button>
+          <div id="save-state" class="save-state">No file open</div>
+        </div>
+
+        <nav class="menu-row" aria-label="Application menu">
+          <button id="file-menu-toggle" type="button" aria-haspopup="menu" aria-expanded="false">File</button>
+          <button type="button">Edit</button>
+          <button type="button">View</button>
+          <button type="button">Insert</button>
+          <button id="format-toggle" type="button">Format</button>
+          <button type="button">Tools</button>
+          <button type="button">Help</button>
+        </nav>
+
+        <div id="file-menu" class="docs-menu" role="menu" hidden>
+          <button id="file-new-doc" type="button" role="menuitem"><span class="menu-icon">+</span><span>New document</span><small>Cmd+N</small></button>
+          <button id="file-open-docs" type="button" role="menuitem"><span class="menu-icon">OPEN</span><span>Open docs list</span><small>Cmd+O</small></button>
+          <button id="file-new-folder" type="button" role="menuitem"><span class="menu-icon">DIR</span><span>New folder</span></button>
+          <div class="menu-separator"></div>
+          <button id="file-save" type="button" role="menuitem"><span class="menu-icon">SAVE</span><span>Save</span><small>Cmd+S</small></button>
+          <button type="button" role="menuitem" disabled><span class="menu-icon">VER</span><span>Version history</span></button>
+          <div class="menu-separator"></div>
+          <button type="button" role="menuitem" disabled><span class="menu-icon">i</span><span>Details</span></button>
+          <button type="button" role="menuitem" disabled><span class="menu-icon">PR</span><span>Print</span><small>Cmd+P</small></button>
+        </div>
+
+        <div id="format-panel" class="toolbar" aria-label="Formatting shortcuts" hidden>
+          <div class="toolbar-group select-group">
+            <button data-block="p" class="select-like" type="button">Normal text</button>
+          </div>
+          <div class="toolbar-group">
+            <button data-block="h1" type="button">H1</button>
+            <button data-block="h2" type="button">H2</button>
+            <button data-block="quote" type="button">Quote</button>
+          </div>
+          <div class="toolbar-group">
+            <button data-inline="bold" type="button"><strong>B</strong></button>
+            <button data-inline="italic" type="button"><em>I</em></button>
+            <button data-inline="code" type="button">Code</button>
+          </div>
+          <div class="toolbar-group">
+            <button data-block="bullet" type="button">Bullet</button>
+          </div>
+          <span class="format-help">Markdown shortcuts: <code># </code><code>## </code><code>- </code><code>**bold**</code></span>
+        </div>
+      </header>
+
+      <main id="docs-view" class="docs-view">
+        <section class="template-area">
+          <div class="docs-section-heading">New document</div>
+          <button id="home-new-doc" class="blank-template" type="button" aria-label="Create new document">
+            <span class="plus-mark"><i></i><b></b></span>
+          </button>
+          <span class="template-label">Blank document</span>
+        </section>
+
+        <section class="docs-list-card">
+          <div class="docs-list-toolbar">
+            <nav id="docs-breadcrumbs" class="docs-breadcrumbs" aria-label="Folder breadcrumb"></nav>
+            <div class="docs-list-actions">
+              <button id="home-new-folder" class="text-button" type="button">New folder</button>
+            </div>
+          </div>
+          <div class="docs-table-header">
+            <span>Name</span>
+            <span>Type</span>
+            <span>Modified</span>
+          </div>
+          <div id="docs-list" class="docs-list" aria-label="Documents"></div>
+        </section>
+      </main>
+
+      <main id="editor-view" class="stage" hidden>
+        <article class="page-card" aria-label="Document editor">
+          <div id="editor" class="notion-editor" aria-label="Rendered Markdown editor"></div>
+        </article>
+      </main>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
