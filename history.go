@@ -18,8 +18,10 @@ import (
 
 // Saves are recorded as real git commits in a hidden bare repository under
 // <root>/.branch/history.git. Each file gets its own commit chain:
-//   refs/cur/<key>        the version the file on disk currently matches
-//   refs/tips/<key>/<sha> every leaf of the version tree
+//
+//	refs/cur/<key>        the version the file on disk currently matches
+//	refs/tips/<key>/<sha> every leaf of the version tree
+//
 // Restoring moves refs/cur to an older commit without rewriting anything, so
 // the next save branches off that commit and the history forms a tree.
 const historyDirName = ".branch"

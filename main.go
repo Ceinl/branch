@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
@@ -16,10 +17,12 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -118,6 +121,10 @@ func main() {
 	mux.HandleFunc("/shoo/callback", a.handleIndex)
 	mux.HandleFunc("/app.js", a.handleAsset("web/app.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/styles.css", a.handleAsset("web/styles.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("ok"))
+	})
 	mux.HandleFunc("/api/config", a.handleConfig)
 	mux.HandleFunc("/api/session", a.handleSession)
 	mux.HandleFunc("/api/root", a.withAPI(a.handleRoot))
@@ -154,7 +161,17 @@ func main() {
 	if cfg.open {
 		openBrowser(openURL)
 	}
-	if err := http.Serve(listener, mux); err != nil {
+	server := &http.Server{Handler: mux}
+	go func() {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		<-ctx.Done()
+		fmt.Println("\nShutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }
@@ -188,7 +205,8 @@ func openBrowser(url string) {
 	}
 }
 
-const appVersion = "0.2.0"
+// Overridden at release time via -ldflags "-X main.appVersion=v0.x.y".
+var appVersion = "dev"
 
 type cliConfig struct {
 	addr      string
