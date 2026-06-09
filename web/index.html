@@ -71,8 +71,8 @@
           <button id="file-save" type="button" role="menuitem"><span class="menu-icon">SAVE</span><span>Save</span><small>Cmd+S</small></button>
           <button id="file-history" type="button" role="menuitem"><span class="menu-icon">VER</span><span>Version history</span><small>Cmd+Shift+H</small></button>
           <div class="menu-separator"></div>
-          <button type="button" role="menuitem" disabled><span class="menu-icon">i</span><span>Details</span></button>
-          <button type="button" role="menuitem" disabled><span class="menu-icon">PR</span><span>Print</span><small>Cmd+P</small></button>
+          <button id="file-rename" type="button" role="menuitem"><span class="menu-icon">REN</span><span>Rename</span></button>
+          <button id="file-delete" type="button" role="menuitem"><span class="menu-icon">DEL</span><span>Delete</span></button>
         </div>
 
         <div id="format-panel" class="toolbar" aria-label="Formatting shortcuts" hidden>
@@ -129,8 +129,14 @@
         <div id="history-empty" class="history-empty" hidden></div>
         <div id="history-preview" class="history-preview" hidden>
           <div class="history-preview-bar">
-            <span id="history-preview-meta" class="history-preview-meta"></span>
-            <button id="history-restore" class="history-restore" type="button">Restore</button>
+            <div class="history-tabs" role="tablist">
+              <button id="history-tab-changes" class="history-tab active" type="button" role="tab">Changes</button>
+              <button id="history-tab-document" class="history-tab" type="button" role="tab">Document</button>
+            </div>
+            <div class="history-preview-actions">
+              <button id="history-name" class="text-button" type="button" title="Name this version">Name</button>
+              <button id="history-restore" class="history-restore" type="button">Restore</button>
+            </div>
           </div>
           <div id="history-preview-body" class="history-preview-body"></div>
         </div>

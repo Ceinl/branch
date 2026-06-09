@@ -30,6 +30,7 @@ const state = {
   historyOpen: false,
   historyNodes: [],
   historySelected: null,
+  historyTab: "changes",
 };
 
 const els = {
@@ -55,6 +56,8 @@ const els = {
   fileNewFolder: document.getElementById("file-new-folder"),
   fileOpenDocs: document.getElementById("file-open-docs"),
   fileSave: document.getElementById("file-save"),
+  fileRename: document.getElementById("file-rename"),
+  fileDelete: document.getElementById("file-delete"),
   collabPresence: document.getElementById("collab-presence"),
   formatToggle: document.getElementById("format-toggle"),
   formatPanel: document.getElementById("format-panel"),
@@ -71,9 +74,11 @@ const els = {
   historyGraph: document.getElementById("history-graph"),
   historyEmpty: document.getElementById("history-empty"),
   historyPreview: document.getElementById("history-preview"),
-  historyPreviewMeta: document.getElementById("history-preview-meta"),
   historyPreviewBody: document.getElementById("history-preview-body"),
   historyRestore: document.getElementById("history-restore"),
+  historyName: document.getElementById("history-name"),
+  historyTabChanges: document.getElementById("history-tab-changes"),
+  historyTabDocument: document.getElementById("history-tab-document"),
 };
 
 init().catch((error) => showError(error.message));
@@ -140,6 +145,8 @@ function bindEvents() {
   els.fileNewFolder.addEventListener("click", () => createFolder());
   els.fileOpenDocs.addEventListener("click", () => goToDocs());
   els.fileSave.addEventListener("click", () => saveNow());
+  els.fileRename.addEventListener("click", () => renameCurrentFile().catch((error) => showError(error.message)));
+  els.fileDelete.addEventListener("click", () => deleteCurrentFile().catch((error) => showError(error.message)));
   els.backToDocs.addEventListener("click", () => goToDocs());
   els.fileMenuToggle.addEventListener("click", () => toggleFileMenu());
   els.formatToggle.addEventListener("click", () => toggleFormatPanel());
@@ -147,6 +154,9 @@ function bindEvents() {
   els.historyToggle.addEventListener("click", () => toggleHistoryPanel());
   els.historyClose.addEventListener("click", () => closeHistoryPanel());
   els.historyRestore.addEventListener("click", () => restoreSelectedVersion());
+  els.historyName.addEventListener("click", () => nameSelectedVersion().catch((error) => showError(error.message)));
+  els.historyTabChanges.addEventListener("click", () => setHistoryTab("changes"));
+  els.historyTabDocument.addEventListener("click", () => setHistoryTab("document"));
 
   els.docsSearch.addEventListener("input", () => {
     state.filter = els.docsSearch.value.trim().toLowerCase();
@@ -608,14 +618,15 @@ function renderDocsList() {
 }
 
 function docsRow(item, isParent) {
-  const button = document.createElement("button");
-  button.className = "docs-row";
-  button.type = "button";
+  const row = document.createElement("div");
+  row.className = "docs-row";
+  row.setAttribute("role", "button");
+  row.tabIndex = 0;
   const isDirectory = item.kind === "directory";
   const icon = isDirectory ? "DIR" : item.markdown ? "MD" : "TXT";
   const type = isParent ? "Parent folder" : isDirectory ? "Folder" : item.markdown ? "Markdown" : item.extension || "Text";
   const modified = isParent ? "" : formatDate(item.modified);
-  button.innerHTML = `
+  row.innerHTML = `
     <span class="docs-row-main">
       <span class="docs-row-icon${isDirectory ? " folder" : ""}">${icon}</span>
       <span class="docs-row-name">${escapeHTML(item.name)}</span>
@@ -623,7 +634,7 @@ function docsRow(item, isParent) {
     <span class="docs-row-meta">${escapeHTML(type)}</span>
     <span class="docs-row-meta">${escapeHTML(modified)}</span>
   `;
-  button.addEventListener("click", async () => {
+  const open = async () => {
     try {
       await maybeSaveBeforeNavigation();
       if (isDirectory) {
@@ -635,8 +646,85 @@ function docsRow(item, isParent) {
     } catch (error) {
       showError(error.message);
     }
+  };
+  row.addEventListener("click", (event) => {
+    if (event.target.closest(".docs-row-actions")) return;
+    open();
   });
-  return button;
+  row.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.target.closest(".docs-row-actions")) {
+      event.preventDefault();
+      open();
+    }
+  });
+  if (!isParent) {
+    const actions = document.createElement("span");
+    actions.className = "docs-row-actions";
+    if (!isDirectory) {
+      const rename = document.createElement("button");
+      rename.type = "button";
+      rename.className = "docs-row-action";
+      rename.textContent = "Rename";
+      rename.addEventListener("click", () => renameItem(item).catch((error) => showError(error.message)));
+      actions.append(rename);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "docs-row-action danger";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", () => deleteItem(item).catch((error) => showError(error.message)));
+    actions.append(remove);
+    row.append(actions);
+  }
+  return row;
+}
+
+async function renameCurrentFile() {
+  closeFileMenu();
+  if (!state.file) return;
+  await maybeSaveBeforeNavigation();
+  const name = prompt("Rename to", basename(state.file.path));
+  if (!name || name.trim() === basename(state.file.path)) return;
+  const to = joinPath(dirname(state.file.path), name.trim());
+  const result = await api("/api/file/rename", {
+    method: "POST",
+    body: JSON.stringify({ path: state.file.path, to }),
+  });
+  showToast(`Renamed to ${result.path}`);
+  await loadFile(result.path);
+}
+
+async function deleteCurrentFile() {
+  closeFileMenu();
+  if (!state.file) return;
+  if (!confirm(`Delete "${basename(state.file.path)}"? Its version history is kept.`)) return;
+  const path = state.file.path;
+  state.file = null;
+  state.dirty = false;
+  await api(`/api/file?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+  showToast(`Deleted ${basename(path)}`);
+  await loadDirectory(dirname(path));
+  showDocsView();
+}
+
+async function renameItem(item) {
+  const name = prompt("Rename to", item.name);
+  if (!name || name.trim() === item.name) return;
+  const to = joinPath(dirname(item.path), name.trim());
+  const result = await api("/api/file/rename", {
+    method: "POST",
+    body: JSON.stringify({ path: item.path, to }),
+  });
+  await loadDirectory(state.directory);
+  showToast(`Renamed to ${result.path}`);
+}
+
+async function deleteItem(item) {
+  const what = item.kind === "directory" ? "folder" : "file";
+  if (!confirm(`Delete ${what} "${item.name}"?${item.kind === "directory" ? "" : " Its version history is kept."}`)) return;
+  await api(`/api/file?path=${encodeURIComponent(item.path)}`, { method: "DELETE" });
+  await loadDirectory(state.directory);
+  showToast(`Deleted ${item.name}`);
 }
 
 async function maybeSaveBeforeNavigation() {
@@ -776,6 +864,9 @@ async function pollCollab() {
 function handleRemoteDocument(message) {
   if (!state.file || message.path !== state.file.path) return;
   if (message.type !== "snapshot" && message.clientId && message.clientId === state.clientId) return;
+  if (message.modified) {
+    state.file.modified = message.modified;
+  }
   if (typeof message.content !== "string" || message.content === state.content) return;
 
   if (state.dirty) {
@@ -1510,10 +1601,28 @@ async function saveNow() {
   }
   state.saving = true;
   setSaveState("Saving", "dirty");
-  const result = await api("/api/file", {
-    method: "PUT",
-    body: JSON.stringify({ path: state.file.path, content, clientId: state.clientId }),
-  });
+  let result;
+  try {
+    result = await api("/api/file", {
+      method: "PUT",
+      body: JSON.stringify({ path: state.file.path, content, clientId: state.clientId, baseModified: state.file.modified || "" }),
+    });
+  } catch (error) {
+    if (error.status !== 409) {
+      state.saving = false;
+      throw error;
+    }
+    const overwrite = confirm("This file changed on the server since you loaded it. Save your version and overwrite it? (The other version stays in history.)");
+    if (!overwrite) {
+      state.saving = false;
+      setSaveState("Server changes pending", "dirty");
+      return;
+    }
+    result = await api("/api/file", {
+      method: "PUT",
+      body: JSON.stringify({ path: state.file.path, content, clientId: state.clientId, force: true }),
+    });
+  }
   state.file.modified = result.modified;
   state.file.size = result.size;
   state.content = content;
@@ -1570,10 +1679,9 @@ async function refreshHistory() {
     els.historyEmpty.textContent = "No saved versions yet. Versions appear after the first save.";
   }
   renderHistoryGraph();
-  const selected = state.historyNodes.find((node) => node.id === state.historySelected);
+  const selected = selectedHistoryNode();
   if (selected) {
-    els.historyRestore.disabled = selected.current;
-    els.historyRestore.textContent = selected.current ? "Current version" : "Restore";
+    renderHistoryPreviewHeaderOnly(selected);
   }
 }
 
@@ -1662,10 +1770,18 @@ function renderHistoryGraph() {
     button.className = `history-row${node.id === state.historySelected ? " selected" : ""}${node.current ? " current" : ""}`;
     button.style.top = `${row * HISTORY_ROW_HEIGHT}px`;
     button.style.left = `${graphWidth}px`;
-    const label = node.current ? `<span class="history-badge">Current</span>` : "";
+    button.title = formatDate(node.time);
+    const badge = node.current ? `<span class="history-badge">Current</span>` : "";
+    const title = node.name
+      ? `<span class="history-row-name">${escapeHTML(node.name)}</span>`
+      : escapeHTML(formatRelative(node.time));
+    const stats = node.additions || node.deletions
+      ? ` · <span class="diff-stat-add">+${node.additions}</span> <span class="diff-stat-del">−${node.deletions}</span>`
+      : "";
+    const when = node.name ? `${escapeHTML(formatRelative(node.time))} · ` : "";
     button.innerHTML = `
-      <span class="history-row-time">${escapeHTML(formatDate(node.time))}${label}</span>
-      <span class="history-row-author">${escapeHTML(node.author || "")}</span>
+      <span class="history-row-time">${title}${badge}</span>
+      <span class="history-row-author">${when}${escapeHTML(node.author || "")}${stats}</span>
     `;
     button.addEventListener("click", () => selectHistoryNode(node).catch((error) => showError(error.message)));
     els.historyGraph.append(button);
@@ -1676,21 +1792,51 @@ function renderHistoryGraph() {
 async function selectHistoryNode(node) {
   state.historySelected = node.id;
   renderHistoryGraph();
-  const data = await api(`/api/file/history/content?path=${encodeURIComponent(state.file.path)}&id=${encodeURIComponent(node.id)}`);
-  if (state.historySelected !== node.id) return;
-  renderHistoryPreview(node, data.content || "");
+  renderHistoryPreview(node);
+  await loadHistoryTab(node);
 }
 
-function renderHistoryPreview(node, content) {
+function setHistoryTab(tab) {
+  state.historyTab = tab;
+  const node = selectedHistoryNode();
+  if (!node) return;
+  renderHistoryPreview(node);
+  loadHistoryTab(node).catch((error) => showError(error.message));
+}
+
+function selectedHistoryNode() {
+  return state.historyNodes.find((node) => node.id === state.historySelected) || null;
+}
+
+async function loadHistoryTab(node) {
+  const tab = state.historyTab;
+  if (tab === "document") {
+    const data = await api(`/api/file/history/content?path=${encodeURIComponent(state.file.path)}&id=${encodeURIComponent(node.id)}`);
+    if (state.historySelected !== node.id || state.historyTab !== tab) return;
+    renderHistoryDocument(data.content || "");
+  } else {
+    const data = await api(`/api/file/history/diff?path=${encodeURIComponent(state.file.path)}&id=${encodeURIComponent(node.id)}`);
+    if (state.historySelected !== node.id || state.historyTab !== tab) return;
+    renderHistoryDiff(data.diff || "");
+  }
+}
+
+function renderHistoryPreview(node) {
   if (!node) {
     els.historyPreview.hidden = true;
     els.historyPreviewBody.innerHTML = "";
     return;
   }
   els.historyPreview.hidden = false;
-  els.historyPreviewMeta.textContent = `${formatDate(node.time)} · ${node.author || ""}`;
+  els.historyTabChanges.classList.toggle("active", state.historyTab === "changes");
+  els.historyTabDocument.classList.toggle("active", state.historyTab === "document");
   els.historyRestore.disabled = node.current;
   els.historyRestore.textContent = node.current ? "Current version" : "Restore";
+  els.historyName.textContent = node.name ? "Rename" : "Name";
+  els.historyPreviewBody.innerHTML = "";
+}
+
+function renderHistoryDocument(content) {
   els.historyPreviewBody.innerHTML = "";
   parseMarkdownBlocks(content || "").forEach((block) => {
     const el = document.createElement("div");
@@ -1702,6 +1848,56 @@ function renderHistoryPreview(node, content) {
   if (!els.historyPreviewBody.children.length) {
     els.historyPreviewBody.textContent = "Empty document.";
   }
+}
+
+function renderHistoryDiff(diff) {
+  els.historyPreviewBody.innerHTML = "";
+  const container = document.createElement("div");
+  container.className = "history-diff";
+  let lines = 0;
+  for (const line of (diff || "").split("\n")) {
+    if (/^(diff --git|index |--- |\+\+\+ |new file|deleted file|old mode|new mode|\\ No newline)/.test(line)) continue;
+    const el = document.createElement("div");
+    if (line.startsWith("@@")) {
+      el.className = "diff-hunk";
+      el.textContent = "···";
+    } else if (line.startsWith("+")) {
+      el.className = "diff-add";
+      el.textContent = line.slice(1) || " ";
+    } else if (line.startsWith("-")) {
+      el.className = "diff-del";
+      el.textContent = line.slice(1) || " ";
+    } else {
+      el.className = "diff-ctx";
+      el.textContent = line.slice(1) || " ";
+    }
+    container.append(el);
+    lines++;
+  }
+  if (!lines) {
+    container.textContent = "No changes in this save.";
+  }
+  els.historyPreviewBody.append(container);
+}
+
+async function nameSelectedVersion() {
+  const node = selectedHistoryNode();
+  if (!node || !state.file) return;
+  const name = prompt("Name this version (empty to remove the name)", node.name || "");
+  if (name === null) return;
+  await api("/api/file/history/label", {
+    method: "POST",
+    body: JSON.stringify({ path: state.file.path, id: node.id, name: name.trim() }),
+  });
+  await refreshHistory();
+  const updated = selectedHistoryNode();
+  if (updated) renderHistoryPreviewHeaderOnly(updated);
+}
+
+function renderHistoryPreviewHeaderOnly(node) {
+  els.historyRestore.disabled = node.current;
+  els.historyRestore.textContent = node.current ? "Current version" : "Restore";
+  els.historyName.textContent = node.name ? "Rename" : "Name";
 }
 
 async function restoreSelectedVersion() {
@@ -1719,6 +1915,9 @@ async function restoreSelectedVersion() {
     state.dirty = false;
     state.localDirtyBlocks.clear();
     state.remotePending = null;
+    if (result.modified) {
+      state.file.modified = result.modified;
+    }
     renderMarkdownDocument(state.content);
     setSaveState("Restored", "saved");
     showToast("Restored selected version. New edits will branch from it.");
@@ -1861,7 +2060,9 @@ async function api(path, options = {}) {
       state.user = null;
       showAuthView();
     }
-    throw new Error(data.error || `${response.status} ${response.statusText}`);
+    const error = new Error(data.error || `${response.status} ${response.statusText}`);
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
@@ -1888,6 +2089,18 @@ function uniqueDocName() {
   const now = new Date();
   const stamp = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")].join("-");
   return `note-${stamp}.md`;
+}
+
+function formatRelative(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const seconds = (Date.now() - date.getTime()) / 1000;
+  if (seconds < 45) return "just now";
+  if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))} min ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)} h ago`;
+  if (seconds < 7 * 86400) return `${Math.round(seconds / 86400)} d ago`;
+  return formatDate(value);
 }
 
 function formatDate(value) {
