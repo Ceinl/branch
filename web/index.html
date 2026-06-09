@@ -4,14 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Branch</title>
-    <script>
-      (function () {
-        var saved = null;
-        try { saved = localStorage.getItem("branch-theme"); } catch (_) {}
-        var dark = saved ? saved === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
-        document.documentElement.dataset.theme = dark ? "dark" : "light";
-      })();
-    </script>
+    <script src="/theme.js"></script>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>

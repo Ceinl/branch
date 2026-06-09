@@ -21,7 +21,7 @@ func testApp(t *testing.T) *app {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &app{root: root, rootReal: rootReal, sessions: newSessionStore(), shoo: newShooVerifier(), collab: newCollabHub(), history: newHistoryStore(root, false)}
+	return &app{root: root, rootReal: rootReal, sessions: newSessionStore(""), shoo: newShooVerifier(), collab: newCollabHub(), history: newHistoryStore(root, false)}
 }
 
 func TestReadOnlyRejectsMutations(t *testing.T) {

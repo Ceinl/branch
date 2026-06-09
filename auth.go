@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -32,17 +34,62 @@ type authUser struct {
 }
 
 type authSession struct {
-	User authUser
-	Exp  time.Time
+	User authUser  `json:"user"`
+	Exp  time.Time `json:"exp"`
 }
 
+// sessionStore keeps sessions keyed by the SHA-256 of the cookie token, so
+// the optional persistence file never contains usable tokens. With an empty
+// path the store is memory-only.
 type sessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]authSession
+	path     string
 }
 
-func newSessionStore() *sessionStore {
-	return &sessionStore{sessions: make(map[string]authSession)}
+func newSessionStore(path string) *sessionStore {
+	s := &sessionStore{sessions: make(map[string]authSession), path: path}
+	s.load()
+	return s
+}
+
+func hashSessionToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func (s *sessionStore) load() {
+	if s.path == "" {
+		return
+	}
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		return
+	}
+	stored := map[string]authSession{}
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return
+	}
+	now := time.Now()
+	for key, session := range stored {
+		if now.Before(session.Exp) {
+			s.sessions[key] = session
+		}
+	}
+}
+
+func (s *sessionStore) saveLocked() {
+	if s.path == "" {
+		return
+	}
+	data, err := json.Marshal(s.sessions)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
+		return
+	}
+	_ = os.WriteFile(s.path, data, 0600)
 }
 
 func (s *sessionStore) create(user authUser, exp time.Time) (string, error) {
@@ -52,7 +99,8 @@ func (s *sessionStore) create(user authUser, exp time.Time) (string, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sessions[token] = authSession{User: user, Exp: exp}
+	s.sessions[hashSessionToken(token)] = authSession{User: user, Exp: exp}
+	s.saveLocked()
 	return token, nil
 }
 
@@ -62,12 +110,14 @@ func (s *sessionStore) get(token string) (authUser, bool) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	session, ok := s.sessions[token]
+	key := hashSessionToken(token)
+	session, ok := s.sessions[key]
 	if !ok {
 		return authUser{}, false
 	}
 	if time.Now().After(session.Exp) {
-		delete(s.sessions, token)
+		delete(s.sessions, key)
+		s.saveLocked()
 		return authUser{}, false
 	}
 	return session.User, true
@@ -76,7 +126,8 @@ func (s *sessionStore) get(token string) (authUser, bool) {
 func (s *sessionStore) delete(token string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.sessions, token)
+	delete(s.sessions, hashSessionToken(token))
+	s.saveLocked()
 }
 
 type shooVerifier struct {
@@ -241,6 +292,9 @@ func (v *shooVerifier) fetchKeysLocked() error {
 func (a *app) handleSession(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
+	if a.blockCrossOrigin(w, r) {
+		return
+	}
 	if !a.auth {
 		writeJSON(w, http.StatusOK, map[string]any{"user": localUser()})
 		return

@@ -109,7 +109,7 @@ func main() {
 		rootReal:  rootReal,
 		appOrigin: cfg.origin,
 		auth:      cfg.origin != "",
-		sessions:  newSessionStore(),
+		sessions:  newSessionStore(sessionStorePath(root, cfg.origin != "")),
 		shoo:      newShooVerifier(),
 		collab:    newCollabHub(),
 		history:   newHistoryStore(root, !cfg.noHistory),
@@ -120,6 +120,7 @@ func main() {
 	mux.HandleFunc("/", a.handleIndex)
 	mux.HandleFunc("/shoo/callback", a.handleIndex)
 	mux.HandleFunc("/app.js", a.handleAsset("web/app.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("/theme.js", a.handleAsset("web/theme.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/styles.css", a.handleAsset("web/styles.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -300,6 +301,37 @@ func validatePublicOrigin(origin string) {
 	}
 }
 
+// Sessions persist across restarts only in shared mode; local mode never
+// creates real sessions, so it stays memory-only and writes nothing.
+func sessionStorePath(root string, auth bool) string {
+	if !auth {
+		return ""
+	}
+	return filepath.Join(root, historyDirName, "sessions.json")
+}
+
+// blockCrossOrigin rejects state-changing requests whose Origin header does
+// not match this server, closing off cross-site request forgery from
+// browsers. Requests without an Origin header (curl, scripts) pass through.
+func (a *app) blockCrossOrigin(w http.ResponseWriter, r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	if origin == a.appOrigin {
+		return false
+	}
+	if parsed, err := url.Parse(origin); err == nil && parsed.Host == r.Host {
+		return false
+	}
+	writeError(w, http.StatusForbidden, "cross-origin request rejected")
+	return true
+}
+
 func randomToken() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -319,6 +351,13 @@ func (a *app) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; script-src 'self' https://shoo.dev; style-src 'self'; "+
+			"img-src 'self' data: https:; connect-src 'self' https://shoo.dev; "+
+			"frame-ancestors 'none'; base-uri 'none'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	_, _ = w.Write(data)
 }
 
@@ -359,6 +398,9 @@ func (a *app) withAPI(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
+		if a.blockCrossOrigin(w, r) {
+			return
+		}
 		user, err := a.requireUser(r)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, err.Error())
