@@ -12,6 +12,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,9 +27,13 @@ var webFiles embed.FS
 const maxEditableBytes = 12 * 1024 * 1024
 
 type app struct {
-	root     string
-	rootReal string
-	token    string
+	root      string
+	rootReal  string
+	appOrigin string
+	auth      bool
+	sessions  *sessionStore
+	shoo      *shooVerifier
+	collab    *collabHub
 }
 
 type fileEntry struct {
@@ -44,20 +49,9 @@ type fileEntry struct {
 }
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:8080", "address to listen on")
-	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: branch [--addr host:port] [path]\n")
-		fmt.Fprintf(flag.CommandLine.Output(), "Example: branch .\n\n")
-		flag.PrintDefaults()
-	}
-	flag.Parse()
+	cfg := parseCLI()
 
-	rootArg := "."
-	if flag.NArg() > 0 {
-		rootArg = flag.Arg(0)
-	}
-
-	root, err := filepath.Abs(rootArg)
+	root, err := filepath.Abs(cfg.root)
 	if err != nil {
 		log.Fatalf("resolve root: %v", err)
 	}
@@ -72,25 +66,107 @@ func main() {
 	if err != nil {
 		log.Fatalf("resolve root symlink: %v", err)
 	}
-	token, err := randomToken()
-	if err != nil {
-		log.Fatalf("create token: %v", err)
+	a := &app{
+		root:      root,
+		rootReal:  rootReal,
+		appOrigin: cfg.origin,
+		auth:      cfg.origin != "",
+		sessions:  newSessionStore(),
+		shoo:      newShooVerifier(),
+		collab:    newCollabHub(),
 	}
-
-	a := &app{root: root, rootReal: rootReal, token: token}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleIndex)
+	mux.HandleFunc("/shoo/callback", a.handleIndex)
 	mux.HandleFunc("/app.js", a.handleAsset("web/app.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/styles.css", a.handleAsset("web/styles.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("/api/config", a.handleConfig)
+	mux.HandleFunc("/api/session", a.handleSession)
 	mux.HandleFunc("/api/root", a.withAPI(a.handleRoot))
 	mux.HandleFunc("/api/files", a.withAPI(a.handleFiles))
 	mux.HandleFunc("/api/file", a.withAPI(a.handleFile))
+	mux.HandleFunc("/api/file/collab", a.withAPI(a.handleFileCollab))
+	mux.HandleFunc("/api/file/stream", a.withAuth(a.handleFileStream))
 
-	url := fmt.Sprintf("http://%s/?token=%s", *addr, token)
+	openURL := fmt.Sprintf("http://%s/", cfg.addr)
+	if cfg.origin != "" {
+		openURL = cfg.origin
+	}
 	fmt.Printf("Branch serving %s\n", root)
-	fmt.Printf("Open %s\n", url)
-	if err := http.ListenAndServe(*addr, mux); err != nil {
+	fmt.Printf("Open %s\n", openURL)
+	if cfg.share {
+		fmt.Printf("Listening on %s for shared access\n", cfg.addr)
+	}
+	if err := http.ListenAndServe(cfg.addr, mux); err != nil {
 		log.Fatal(err)
+	}
+}
+
+type cliConfig struct {
+	addr   string
+	origin string
+	root   string
+	share  bool
+}
+
+func parseCLI() cliConfig {
+	if len(os.Args) > 1 && os.Args[1] == "share" {
+		return parseShareCLI(os.Args[2:])
+	}
+	return parseServeCLI(os.Args[1:])
+}
+
+func parseServeCLI(args []string) cliConfig {
+	fs := flag.NewFlagSet("branch", flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1:8080", "address to listen on")
+	origin := fs.String("origin", "", "public origin for Shoo auth, e.g. https://docs.example.com")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage:\n")
+		fmt.Fprintf(fs.Output(), "  branch [--addr host:port] [--origin https://host] [path]\n")
+		fmt.Fprintf(fs.Output(), "  branch share https://public-url [path]\n\n")
+		fmt.Fprintf(fs.Output(), "Examples:\n")
+		fmt.Fprintf(fs.Output(), "  branch .\n")
+		fmt.Fprintf(fs.Output(), "  branch share https://docs.example.com .\n\n")
+		fs.PrintDefaults()
+	}
+	_ = fs.Parse(args)
+	rootArg := "."
+	if fs.NArg() > 0 {
+		rootArg = fs.Arg(0)
+	}
+	cleanOrigin := strings.TrimRight(*origin, "/")
+	if cleanOrigin != "" {
+		validatePublicOrigin(cleanOrigin)
+	}
+	return cliConfig{addr: *addr, origin: cleanOrigin, root: rootArg}
+}
+
+func parseShareCLI(args []string) cliConfig {
+	fs := flag.NewFlagSet("branch share", flag.ExitOnError)
+	addr := fs.String("addr", "0.0.0.0:8080", "address to listen on")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: branch share [--addr host:port] https://public-url [path]\n")
+		fmt.Fprintf(fs.Output(), "Example: branch share https://docs.example.com .\n\n")
+		fs.PrintDefaults()
+	}
+	_ = fs.Parse(args)
+	if fs.NArg() < 1 {
+		fs.Usage()
+		os.Exit(2)
+	}
+	origin := strings.TrimRight(fs.Arg(0), "/")
+	validatePublicOrigin(origin)
+	rootArg := "."
+	if fs.NArg() > 1 {
+		rootArg = fs.Arg(1)
+	}
+	return cliConfig{addr: *addr, origin: origin, root: rootArg, share: true}
+}
+
+func validatePublicOrigin(origin string) {
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		log.Fatalf("origin must be a bare HTTPS origin, e.g. https://docs.example.com")
 	}
 }
 
@@ -103,18 +179,9 @@ func randomToken() (string, error) {
 }
 
 func (a *app) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+	if r.URL.Path != "/" && r.URL.Path != "/shoo/callback" {
 		http.NotFound(w, r)
 		return
-	}
-	if token := r.URL.Query().Get("token"); token != "" && token == a.token {
-		http.SetCookie(w, &http.Cookie{
-			Name:     "branch_token",
-			Value:    token,
-			Path:     "/",
-			SameSite: http.SameSiteStrictMode,
-			HttpOnly: false,
-		})
 	}
 	data, err := fs.ReadFile(webFiles, "web/index.html")
 	if err != nil {
@@ -141,24 +208,44 @@ func (a *app) handleAsset(path string, contentType string) http.HandlerFunc {
 	}
 }
 
+func (a *app) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	origin := a.shooOriginForRequest(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"origin":        origin,
+		"redirectURI":   strings.TrimRight(origin, "/") + "/shoo/callback",
+		"hasOriginFlag": a.appOrigin != "",
+		"authRequired":  a.auth,
+	})
+}
+
 func (a *app) withAPI(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
-		if !a.authorized(r) {
-			writeError(w, http.StatusUnauthorized, "missing or invalid token")
+		user, err := a.requireUser(r)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, err.Error())
 			return
 		}
-		next(w, r)
+		next(w, r.WithContext(withUser(r.Context(), user)))
 	}
 }
 
-func (a *app) authorized(r *http.Request) bool {
-	if r.Header.Get("X-Branch-Token") == a.token {
-		return true
+func (a *app) withAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, err := a.requireUser(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		next(w, r.WithContext(withUser(r.Context(), user)))
 	}
-	cookie, err := r.Cookie("branch_token")
-	return err == nil && cookie.Value == a.token
 }
 
 func (a *app) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -289,8 +376,9 @@ func (a *app) handleReadFile(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
+		Path     string `json:"path"`
+		Content  string `json:"content"`
+		ClientID string `json:"clientId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -327,6 +415,7 @@ func (a *app) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 		"size":     info.Size(),
 		"modified": info.ModTime().Format(time.RFC3339),
 	})
+	a.collab.broadcastUpdate(slashPath(cleanRel), req.Content, info.ModTime().Format(time.RFC3339), userFromRequest(r), req.ClientID)
 }
 
 func (a *app) handleCreate(w http.ResponseWriter, r *http.Request) {

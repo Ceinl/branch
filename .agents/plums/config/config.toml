@@ -1,0 +1,5 @@
+default_layout = "chat"
+hide_thinking = true
+
+[split]
+left_width = 50

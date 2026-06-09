@@ -11,9 +11,28 @@ const state = {
   activeBlock: null,
   applying: false,
   view: "docs",
+  user: null,
+  clientId: loadClientId(),
+  stream: null,
+  remotePending: null,
+  remoteClients: new Map(),
+  localDirtyBlocks: new Set(),
+  collabVersion: 0,
+  collabTimer: null,
+  presenceTimer: null,
+  presenceHeartbeatTimer: null,
+  collabFallbackTimer: null,
+  collabPollTimer: null,
+  collabPolling: false,
+  streamReady: false,
+  remoteCleanupTimer: null,
+  config: null,
 };
 
 const els = {
+  authView: document.getElementById("auth-view"),
+  signinButton: document.getElementById("signin-button"),
+  authDetail: document.getElementById("auth-detail"),
   docsTopbar: document.getElementById("docs-topbar"),
   editorTopbar: document.getElementById("editor-topbar"),
   docsView: document.getElementById("docs-view"),
@@ -25,6 +44,7 @@ const els = {
   docsList: document.getElementById("docs-list"),
   homeNewDoc: document.getElementById("home-new-doc"),
   homeNewFolder: document.getElementById("home-new-folder"),
+  signoutButton: document.getElementById("signout-button"),
   backToDocs: document.getElementById("back-to-docs"),
   fileMenuToggle: document.getElementById("file-menu-toggle"),
   fileMenu: document.getElementById("file-menu"),
@@ -32,23 +52,48 @@ const els = {
   fileNewFolder: document.getElementById("file-new-folder"),
   fileOpenDocs: document.getElementById("file-open-docs"),
   fileSave: document.getElementById("file-save"),
+  collabPresence: document.getElementById("collab-presence"),
   formatToggle: document.getElementById("format-toggle"),
   formatPanel: document.getElementById("format-panel"),
+  pageCard: document.getElementById("page-card"),
+  remoteCursors: document.getElementById("remote-cursors"),
   title: document.getElementById("document-title"),
   editor: document.getElementById("editor"),
   saveState: document.getElementById("save-state"),
   toast: document.getElementById("toast"),
 };
 
-const token = new URLSearchParams(location.search).get("token") || getCookie("branch_token") || "";
-if (token && location.search.includes("token=")) {
-  history.replaceState(null, "", location.pathname);
+init().catch((error) => showError(error.message));
+
+function loadClientId() {
+  // Keep this page-scoped so duplicated tabs never ignore each other as the same collaborator.
+  return randomClientId();
 }
 
-init().catch((error) => showError(error.message));
+function randomClientId() {
+  if (window.crypto?.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  if (window.crypto?.getRandomValues) {
+    window.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 async function init() {
   bindEvents();
+  state.config = await loadConfig();
+  configureShoo();
+  const signedIn = await establishSession();
+  if (!signedIn) {
+    showAuthView();
+    return;
+  }
   const root = await api("/api/root");
   state.root = root;
   els.docsRootPath.textContent = root.path;
@@ -57,7 +102,25 @@ async function init() {
   showDocsView();
 }
 
+async function loadConfig() {
+  const response = await fetch("/api/config", { credentials: "same-origin" });
+  const config = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(config.error || "Failed to load Branch config");
+  }
+  return config;
+}
+
+function configureShoo() {
+  els.signoutButton.hidden = !state.config?.authRequired;
+  if (!window.Shoo || !state.config?.redirectURI) return;
+  window.Shoo.defaults.redirectUri = state.config.redirectURI;
+  window.Shoo.defaults.clientId = `origin:${new URL(state.config.redirectURI).origin}`;
+}
+
 function bindEvents() {
+  els.signinButton.addEventListener("click", () => signIn());
+  els.signoutButton.addEventListener("click", () => signOut());
   els.homeNewDoc.addEventListener("click", () => createFile());
   els.homeNewFolder.addEventListener("click", () => createFolder());
   els.fileNewDoc.addEventListener("click", () => createFile());
@@ -77,7 +140,10 @@ function bindEvents() {
     if (!state.file && !els.editor.querySelector(".block")) {
       insertBlock("p", "", null).focus();
     }
+    scheduleCollabPresence();
   });
+  els.editor.addEventListener("keyup", () => scheduleCollabPresence());
+  els.editor.addEventListener("mouseup", () => scheduleCollabPresence());
 
   document.querySelectorAll("[data-block]").forEach((button) => {
     button.addEventListener("click", () => setActiveBlockType(button.dataset.block));
@@ -111,6 +177,295 @@ function bindEvents() {
       closeFormatPanel();
     }
   });
+
+  document.addEventListener("selectionchange", () => scheduleCollabPresence());
+  window.addEventListener("resize", () => renderRemoteCursors());
+  document.addEventListener("scroll", () => renderRemoteCursors(), true);
+}
+
+async function establishSession() {
+  if (!state.config?.authRequired) {
+    state.user = { id: "local", name: "Local user" };
+    showAppShell();
+    return true;
+  }
+  try {
+    const existing = await sessionRequest("/api/session");
+    state.user = existing.user;
+    showAppShell();
+    return true;
+  } catch (_) {
+    // Fall back to Shoo's stored identity below.
+  }
+  if (!window.Shoo) {
+    els.authDetail.textContent = "Shoo script did not load. Check network access to https://shoo.dev/.";
+    return false;
+  }
+  if (location.pathname === "/shoo/callback") {
+    els.authDetail.textContent = "Finishing Shoo sign-in...";
+    return false;
+  }
+  const identity = window.Shoo.getIdentity();
+  if (!identity || !identity.token) {
+    return false;
+  }
+  try {
+    const session = await sessionRequest("/api/session", {
+      method: "POST",
+      body: JSON.stringify({ idToken: identity.token }),
+    });
+    state.user = session.user;
+    showAppShell();
+    return true;
+  } catch (error) {
+    window.Shoo.clearIdentity();
+    els.authDetail.textContent = error.message || "Sign-in verification failed.";
+    return false;
+  }
+}
+
+function signIn() {
+  if (!window.Shoo) {
+    showError("Shoo script is not available");
+    return;
+  }
+  startShooSignIn().catch((error) => showError(error.message));
+}
+
+async function startShooSignIn() {
+  const options = shooSignInOptions();
+  if (state.config?.origin && state.config.origin !== window.location.origin) {
+    window.location.assign(state.config.origin + "/");
+    return;
+  }
+  validateShooRedirect(options.redirectUri);
+  if (window.crypto?.subtle?.digest) {
+    await window.Shoo.startSignIn(options);
+    return;
+  }
+  startShooSignInWithoutSubtle(options);
+}
+
+function shooSignInOptions() {
+  const redirectUri = state.config?.redirectURI || new URL("/shoo/callback", window.location.origin).toString();
+  return {
+    returnTo: "/",
+    requestPii: true,
+    redirectUri,
+    clientId: `origin:${new URL(redirectUri).origin}`,
+  };
+}
+
+function validateShooRedirect(redirectUri) {
+  const parsed = new URL(redirectUri);
+  if (parsed.protocol === "https:") return;
+  if (parsed.protocol === "http:" && parsed.hostname === "localhost") return;
+  throw new Error(`Shoo requires HTTPS, or http://localhost for development. Open ${state.config?.origin || "http://localhost"} instead.`);
+}
+
+function startShooSignInWithoutSubtle(options = {}) {
+  const defaults = window.Shoo?.defaults || {};
+  const redirectUri = options.redirectUri || defaults.redirectUri || new URL("/shoo/callback", window.location.origin).toString();
+  const callbackPath = new URL(redirectUri).pathname || defaults.callbackPath || "/shoo/callback";
+  const clientId = options.clientId || defaults.clientId || `origin:${new URL(redirectUri).origin}`;
+  const shooBaseUrl = defaults.shooBaseUrl || "https://shoo.dev";
+  const state = randomPKCEString(32);
+  const verifier = randomPKCEString(64);
+  const challenge = base64URL(sha256Bytes(asciiBytes(verifier)));
+
+  sessionStorage.setItem(defaults.pkceStorageKey || "shoo_pkce", JSON.stringify({ state, verifier, createdAt: Date.now() }));
+  let returnTo = normalizeReturnTo(options.returnTo || "/");
+  if (returnTo === callbackPath) {
+    returnTo = "/";
+  }
+  sessionStorage.setItem(defaults.returnToStorageKey || "shoo_return_to", returnTo);
+
+  const url = new URL("/authorize", shooBaseUrl);
+  url.searchParams.set("client_id", clientId);
+  url.searchParams.set("redirect_uri", redirectUri);
+  url.searchParams.set("state", state);
+  url.searchParams.set("code_challenge", challenge);
+  url.searchParams.set("code_challenge_method", "S256");
+  if (options.requestPii) {
+    url.searchParams.set("pii", "true");
+  }
+  window.location.assign(url.toString());
+}
+
+function randomPKCEString(length) {
+  if (!window.crypto?.getRandomValues) {
+    throw new Error("Shoo sign-in requires browser crypto random values. Use a modern browser.");
+  }
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+  const random = new Uint8Array(length);
+  window.crypto.getRandomValues(random);
+  let out = "";
+  for (const value of random) {
+    out += chars[value % chars.length];
+  }
+  return out;
+}
+
+function normalizeReturnTo(value) {
+  try {
+    const parsed = new URL(value || "/", window.location.origin);
+    if (parsed.origin !== window.location.origin) return "/";
+    const route = parsed.pathname + parsed.search + parsed.hash;
+    return route.startsWith("/") && !route.startsWith("//") ? route : "/";
+  } catch (_) {
+    return "/";
+  }
+}
+
+function asciiBytes(value) {
+  const bytes = new Uint8Array(value.length);
+  for (let i = 0; i < value.length; i += 1) {
+    bytes[i] = value.charCodeAt(i) & 0xff;
+  }
+  return bytes;
+}
+
+function base64URL(bytes) {
+  let binary = "";
+  for (const value of bytes) {
+    binary += String.fromCharCode(value);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function sha256Bytes(input) {
+  const k = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+  const total = (((input.length + 9 + 63) >> 6) << 6);
+  const data = new Uint8Array(total);
+  data.set(input);
+  data[input.length] = 0x80;
+  const bitLength = input.length * 8;
+  data[total - 4] = (bitLength >>> 24) & 0xff;
+  data[total - 3] = (bitLength >>> 16) & 0xff;
+  data[total - 2] = (bitLength >>> 8) & 0xff;
+  data[total - 1] = bitLength & 0xff;
+  const w = new Uint32Array(64);
+  for (let offset = 0; offset < total; offset += 64) {
+    for (let i = 0; i < 16; i += 1) {
+      const j = offset + i * 4;
+      w[i] = ((data[j] << 24) | (data[j + 1] << 16) | (data[j + 2] << 8) | data[j + 3]) >>> 0;
+    }
+    for (let i = 16; i < 64; i += 1) {
+      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    let f = h5;
+    let g = h6;
+    let h = h7;
+    for (let i = 0; i < 64; i += 1) {
+      const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + s1 + ch + k[i] + w[i]) >>> 0;
+      const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (s0 + maj) >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+    h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0;
+    h7 = (h7 + h) >>> 0;
+  }
+  const out = new Uint8Array(32);
+  [h0, h1, h2, h3, h4, h5, h6, h7].forEach((value, i) => {
+    out[i * 4] = (value >>> 24) & 0xff;
+    out[i * 4 + 1] = (value >>> 16) & 0xff;
+    out[i * 4 + 2] = (value >>> 8) & 0xff;
+    out[i * 4 + 3] = value & 0xff;
+  });
+  return out;
+}
+
+function rotr(value, bits) {
+  return (value >>> bits) | (value << (32 - bits));
+}
+
+async function signOut() {
+  try {
+    disconnectCollab();
+    await sessionRequest("/api/session", { method: "DELETE" });
+  } catch (_) {
+    // Continue local sign-out even if the server session was already gone.
+  }
+  if (window.Shoo) {
+    window.Shoo.clearIdentity();
+  }
+  state.user = null;
+  state.file = null;
+  state.content = "";
+  state.dirty = false;
+  showAuthView();
+}
+
+function showAuthView() {
+  els.authView.hidden = false;
+  els.docsTopbar.hidden = true;
+  els.docsView.hidden = true;
+  els.editorTopbar.hidden = true;
+  els.editorView.hidden = true;
+  if (state.config?.origin && state.config.origin !== window.location.origin) {
+    els.authDetail.textContent = `Shoo requires sign-in from ${state.config.origin}. Click sign in to continue there.`;
+  }
+  document.title = "Sign in - Branch";
+}
+
+function showAppShell() {
+  els.authView.hidden = true;
+}
+
+async function sessionRequest(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || `${response.status} ${response.statusText}`);
+  }
+  return data;
 }
 
 function toggleFileMenu() {
@@ -141,6 +496,7 @@ function closeFormatPanel() {
 
 function showDocsView() {
   state.view = "docs";
+  disconnectCollab();
   closeFileMenu();
   closeFormatPanel();
   els.docsTopbar.hidden = false;
@@ -271,12 +627,454 @@ async function loadFile(path) {
   state.file = file;
   state.content = file.content || "";
   state.dirty = false;
+  state.localDirtyBlocks.clear();
   els.title.value = file.name || basename(file.path);
   els.rootPath.textContent = file.path;
   renderMarkdownDocument(state.content);
   setSaveState("Saved", "saved");
   await loadDirectory(dirname(file.path));
   showEditorView();
+  connectCollab(file.path);
+}
+
+function connectCollab(path) {
+  disconnectCollab();
+  state.remotePending = null;
+  state.remoteClients.clear();
+  state.collabVersion = 0;
+  state.streamReady = false;
+  renderPresence();
+  renderRemoteCursors();
+  const stream = new EventSource(`/api/file/stream?path=${encodeURIComponent(path)}&clientId=${encodeURIComponent(state.clientId)}`);
+  state.stream = stream;
+  stream.addEventListener("snapshot", (event) => {
+    state.streamReady = true;
+    clearTimeout(state.collabFallbackTimer);
+    handleCollabMessage(JSON.parse(event.data));
+  });
+  stream.addEventListener("update", (event) => handleCollabMessage(JSON.parse(event.data)));
+  stream.addEventListener("presence", (event) => handleCollabMessage(JSON.parse(event.data)));
+  stream.addEventListener("draft", (event) => handleCollabMessage(JSON.parse(event.data)));
+  stream.addEventListener("leave", (event) => handleCollabMessage(JSON.parse(event.data)));
+  stream.onopen = () => sendCollabPresence().catch(() => {});
+  state.presenceHeartbeatTimer = setInterval(() => sendCollabPresence().catch(() => {}), 15000);
+  state.collabFallbackTimer = setTimeout(() => {
+    if (!state.streamReady) startCollabPolling();
+  }, 1500);
+  stream.onerror = () => {
+    if (state.stream === stream) {
+      startCollabPolling();
+      showToast("Live collaboration disconnected. Reopen the document to reconnect.");
+    }
+  };
+  state.remoteCleanupTimer = setInterval(pruneRemoteClients, 5000);
+}
+
+function disconnectCollab() {
+  clearTimeout(state.collabTimer);
+  clearTimeout(state.presenceTimer);
+  clearTimeout(state.collabFallbackTimer);
+  clearTimeout(state.collabPollTimer);
+  state.collabTimer = null;
+  state.presenceTimer = null;
+  state.collabFallbackTimer = null;
+  state.collabPollTimer = null;
+  state.collabPolling = false;
+  state.streamReady = false;
+  clearInterval(state.presenceHeartbeatTimer);
+  state.presenceHeartbeatTimer = null;
+  clearInterval(state.remoteCleanupTimer);
+  state.remoteCleanupTimer = null;
+  if (state.stream) {
+    state.stream.close();
+    state.stream = null;
+  }
+  state.remoteClients.clear();
+  renderPresence();
+  renderRemoteCursors();
+}
+
+function handleCollabMessage(message) {
+  updateCollabVersion(message);
+  switch (message.type) {
+    case "snapshot":
+    case "update":
+      handleRemoteDocument(message);
+      break;
+    case "presence":
+      handleRemotePresence(message);
+      break;
+    case "draft":
+      handleRemoteDraft(message);
+      break;
+    case "leave":
+      handleRemoteLeave(message);
+      break;
+    default:
+      break;
+  }
+}
+
+function updateCollabVersion(message) {
+  const version = Number(message?.version) || 0;
+  if (version > state.collabVersion) {
+    state.collabVersion = version;
+  }
+}
+
+function startCollabPolling() {
+  if (state.collabPolling || !state.file) return;
+  state.collabPolling = true;
+  pollCollab();
+}
+
+async function pollCollab() {
+  if (!state.collabPolling || !state.file) return;
+  try {
+    const data = await api(`/api/file/collab?path=${encodeURIComponent(state.file.path)}&clientId=${encodeURIComponent(state.clientId)}&since=${state.collabVersion}`);
+    (data.events || []).forEach((message) => handleCollabMessage(message));
+    const version = Number(data.version) || 0;
+    if (version > state.collabVersion) {
+      state.collabVersion = version;
+    }
+  } catch (_) {
+    // Keep polling; transient tunnel failures should not permanently break collaboration.
+  }
+  if (state.collabPolling) {
+    state.collabPollTimer = setTimeout(() => pollCollab(), 1000);
+  }
+}
+
+function handleRemoteDocument(message) {
+  if (!state.file || message.path !== state.file.path) return;
+  if (message.type !== "snapshot" && message.clientId && message.clientId === state.clientId) return;
+  if (typeof message.content !== "string" || message.content === state.content) return;
+
+  if (state.dirty) {
+    const result = applyRemoteMarkdown(message.content);
+    if (result.skipped) {
+      state.remotePending = message;
+      const who = displayUser(message.user);
+      showToast(`${who} saved changes in a block you are editing.`);
+    } else {
+      state.remotePending = null;
+      setSaveState("Editing with live updates", "dirty");
+    }
+    return;
+  }
+
+  state.content = message.content;
+  state.dirty = false;
+  state.localDirtyBlocks.clear();
+  renderMarkdownDocument(message.content);
+  setSaveState(`Updated by ${displayUser(message.user)}`, "saved");
+}
+
+function handleRemoteDraft(message) {
+  if (!state.file || message.path !== state.file.path) return;
+  if (message.clientId && message.clientId === state.clientId) return;
+  rememberRemoteClient(message);
+  if (typeof message.content === "string" && message.content !== state.content) {
+    applyRemoteMarkdown(message.content);
+    setSaveState(state.dirty ? "Editing with live updates" : `Live with ${displayUser(message.user)}`, state.dirty ? "dirty" : "saved");
+  }
+  renderRemoteCursors();
+}
+
+function handleRemotePresence(message) {
+  if (!state.file || message.path !== state.file.path) return;
+  if (message.clientId && message.clientId === state.clientId) return;
+  rememberRemoteClient(message);
+  renderRemoteCursors();
+}
+
+function handleRemoteLeave(message) {
+  if (!message.clientId) return;
+  state.remoteClients.delete(message.clientId);
+  renderPresence();
+  renderRemoteCursors();
+}
+
+function applyRemoteMarkdown(markdown) {
+  const remoteBlocks = parseMarkdownBlocks(markdown || "");
+  if (!remoteBlocks.length) {
+    remoteBlocks.push({ type: "p", html: "" });
+  }
+  const localBlocks = [...els.editor.querySelectorAll(".block")];
+  let changed = false;
+  let skipped = 0;
+
+  state.applying = true;
+  remoteBlocks.forEach((remoteBlock, index) => {
+    const block = localBlocks[index];
+    if (!block) {
+      const next = els.editor.querySelectorAll(".block")[index] || null;
+      els.editor.insertBefore(createBlock(remoteBlock.type, remoteBlock.html, remoteBlock.checked), next);
+      changed = true;
+      return;
+    }
+    if (isProtectedBlock(block)) {
+      skipped++;
+      return;
+    }
+    changed = applyRemoteBlock(block, remoteBlock) || changed;
+  });
+
+  [...els.editor.querySelectorAll(".block")].slice(remoteBlocks.length).reverse().forEach((block) => {
+    if (isProtectedBlock(block)) {
+      skipped++;
+      return;
+    }
+    block.remove();
+    changed = true;
+  });
+  state.applying = false;
+
+  if (changed) {
+    state.content = serializeDocument();
+  }
+  renderRemoteCursors();
+  return { changed, skipped };
+}
+
+function applyRemoteBlock(block, remoteBlock) {
+  const type = remoteBlock.type || "p";
+  const html = remoteBlock.html || "";
+  const checked = !!remoteBlock.checked;
+  let changed = false;
+  if (block.dataset.type !== type) {
+    setBlockType(block, type);
+    changed = true;
+  }
+  if (block.innerHTML !== html) {
+    block.innerHTML = html;
+    changed = true;
+  }
+  if (block.classList.contains("checked") !== checked) {
+    block.classList.toggle("checked", checked);
+    changed = true;
+  }
+  return changed;
+}
+
+function isProtectedBlock(block) {
+  if (!state.dirty) return false;
+  return state.localDirtyBlocks.has(block) || block === state.activeBlock || block === currentSelectionBlock();
+}
+
+function scheduleCollabDraft() {
+  if (!state.file || !state.stream) return;
+  clearTimeout(state.collabTimer);
+  state.collabTimer = setTimeout(() => sendCollabDraft().catch(() => {}), 120);
+}
+
+function scheduleCollabPresence() {
+  if (!state.file || !state.stream) return;
+  clearTimeout(state.presenceTimer);
+  state.presenceTimer = setTimeout(() => sendCollabPresence().catch(() => {}), 120);
+}
+
+async function sendCollabDraft() {
+  await sendCollabEvent(true);
+}
+
+async function sendCollabPresence() {
+  await sendCollabEvent(false);
+}
+
+async function sendCollabEvent(includeContent) {
+  if (!state.file) return;
+  const cursor = currentCursor();
+  const payload = {
+    path: state.file.path,
+    clientId: state.clientId,
+  };
+  if (includeContent) {
+    payload.content = serializeDocument();
+  }
+  if (cursor) {
+    payload.cursor = cursor;
+  }
+  await api("/api/file/collab", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+function rememberRemoteClient(message) {
+  if (!message.clientId) return;
+  const current = state.remoteClients.get(message.clientId) || {};
+  state.remoteClients.set(message.clientId, {
+    user: message.user,
+    cursor: message.cursor || current.cursor,
+    color: current.color || colorForClient(message.clientId),
+    lastSeen: Date.now(),
+  });
+  renderPresence();
+}
+
+function pruneRemoteClients() {
+  const staleBefore = Date.now() - 30000;
+  let changed = false;
+  state.remoteClients.forEach((client, clientId) => {
+    if (client.lastSeen < staleBefore) {
+      state.remoteClients.delete(clientId);
+      changed = true;
+    }
+  });
+  if (changed) {
+    renderPresence();
+    renderRemoteCursors();
+  }
+}
+
+function renderPresence() {
+  if (!els.collabPresence) return;
+  els.collabPresence.innerHTML = "";
+  state.remoteClients.forEach((client) => {
+    const badge = document.createElement("span");
+    badge.className = "collab-avatar";
+    badge.style.setProperty("--collab-color", client.color);
+    badge.title = displayUser(client.user);
+    badge.textContent = initialsForUser(client.user);
+    els.collabPresence.append(badge);
+  });
+}
+
+function renderRemoteCursors() {
+  if (!els.remoteCursors || !els.pageCard) return;
+  els.remoteCursors.innerHTML = "";
+  const pageRect = els.pageCard.getBoundingClientRect();
+  state.remoteClients.forEach((client) => {
+    if (!client.cursor) return;
+    const position = remoteCursorPosition(client.cursor, pageRect);
+    if (!position) return;
+    const cursor = document.createElement("div");
+    cursor.className = "remote-cursor";
+    cursor.style.setProperty("--collab-color", client.color);
+    cursor.style.left = `${position.left}px`;
+    cursor.style.top = `${position.top}px`;
+    cursor.style.height = `${position.height}px`;
+    const label = document.createElement("span");
+    label.textContent = displayUser(client.user);
+    cursor.append(label);
+    els.remoteCursors.append(cursor);
+  });
+}
+
+function remoteCursorPosition(cursor, pageRect) {
+  const blocks = [...els.editor.querySelectorAll(".block")];
+  const block = blocks[cursor.blockIndex];
+  if (!block) return null;
+  const range = rangeForTextOffset(block, cursor.offset);
+  const rect = firstCursorRect(range) || block.getBoundingClientRect();
+  if (!rect) return null;
+  const lineHeight = parseFloat(getComputedStyle(block).lineHeight) || 18;
+  return {
+    left: rect.left - pageRect.left,
+    top: rect.top - pageRect.top,
+    height: Math.max(rect.height || lineHeight, 16),
+  };
+}
+
+function firstCursorRect(range) {
+  if (!range) return null;
+  const rects = range.getClientRects();
+  for (const rect of rects) {
+    if (rect.height) return rect;
+  }
+  const rect = range.getBoundingClientRect();
+  return rect.height ? rect : null;
+}
+
+function currentCursor() {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return null;
+  const block = closestBlock(selection.focusNode);
+  if (!block) return null;
+  const blocks = [...els.editor.querySelectorAll(".block")];
+  const blockIndex = blocks.indexOf(block);
+  if (blockIndex < 0) return null;
+  return {
+    blockIndex,
+    offset: caretOffsetInBlock(block, selection.focusNode, selection.focusOffset),
+  };
+}
+
+function currentSelectionBlock() {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return null;
+  return closestBlock(selection.focusNode);
+}
+
+function closestBlock(node) {
+  if (!node) return null;
+  const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  const block = element?.closest?.(".block");
+  return block && els.editor.contains(block) ? block : null;
+}
+
+function caretOffsetInBlock(block, node, offset) {
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(block);
+    range.setEnd(node, offset);
+    return range.toString().replace(/\u00a0/g, " ").length;
+  } catch (_) {
+    return normalizedText(block).length;
+  }
+}
+
+function rangeForTextOffset(block, offset) {
+  const range = document.createRange();
+  let remaining = Math.max(0, Number(offset) || 0);
+  if (remaining === 0) {
+    range.selectNodeContents(block);
+    range.collapse(true);
+    return range;
+  }
+  const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+  let last = null;
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const length = node.nodeValue.length;
+    last = node;
+    if (remaining <= length) {
+      range.setStart(node, remaining);
+      range.collapse(true);
+      return range;
+    }
+    remaining -= length;
+  }
+  if (last) {
+    range.setStart(last, last.nodeValue.length);
+    range.collapse(true);
+  } else {
+    range.selectNodeContents(block);
+    range.collapse(false);
+  }
+  return range;
+}
+
+function initialsForUser(user) {
+  const name = displayUser(user).trim();
+  const parts = name.split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  return parts.slice(0, 2).map((part) => part[0]).join("").toUpperCase();
+}
+
+function colorForClient(clientId) {
+  const palette = ["#1a73e8", "#d93025", "#188038", "#9334e6", "#f29900", "#00acc1", "#e52592", "#5f6368"];
+  let hash = 0;
+  for (const char of clientId) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  }
+  return palette[hash % palette.length];
+}
+
+function displayUser(user) {
+  if (!user) return "Someone";
+  return user.name || user.email || "Someone";
 }
 
 async function createFile() {
@@ -393,6 +1191,16 @@ function parseMarkdownBlocks(markdown) {
 }
 
 function insertBlock(type, html = "", after = null, checked = false) {
+  const block = createBlock(type, html, checked);
+  if (after) {
+    after.insertAdjacentElement("afterend", block);
+  } else {
+    els.editor.append(block);
+  }
+  return block;
+}
+
+function createBlock(type, html = "", checked = false) {
   const block = document.createElement("div");
   block.className = `block block-${type}`;
   block.dataset.type = type;
@@ -404,17 +1212,13 @@ function insertBlock(type, html = "", after = null, checked = false) {
   }
   block.innerHTML = html || "";
   bindBlock(block);
-  if (after) {
-    after.insertAdjacentElement("afterend", block);
-  } else {
-    els.editor.append(block);
-  }
   return block;
 }
 
 function bindBlock(block) {
   block.addEventListener("focus", () => {
     state.activeBlock = block;
+    scheduleCollabPresence();
   });
   block.addEventListener("keydown", (event) => handleBlockKeydown(event, block));
   block.addEventListener("input", () => handleBlockInput(block));
@@ -637,9 +1441,14 @@ function wrapSelectionWith(tag) {
 
 function markChanged() {
   if (!state.file) return;
+  const block = currentSelectionBlock() || state.activeBlock;
+  if (block) {
+    state.localDirtyBlocks.add(block);
+  }
   state.content = serializeDocument();
   state.dirty = true;
   setSaveState("Editing", "dirty");
+  scheduleCollabDraft();
   scheduleSave();
 }
 
@@ -655,6 +1464,14 @@ async function saveNow() {
     setSaveState("Open or create a file", "error");
     return;
   }
+  if (state.remotePending) {
+    const overwrite = confirm("Someone saved changes while you were editing. Save your version and overwrite the remote changes?");
+    if (!overwrite) {
+      setSaveState("Remote changes pending", "dirty");
+      return;
+    }
+    state.remotePending = null;
+  }
   const content = serializeDocument();
   if (!state.dirty && content === state.content) {
     setSaveState("Saved", "saved");
@@ -664,13 +1481,14 @@ async function saveNow() {
   setSaveState("Saving", "dirty");
   const result = await api("/api/file", {
     method: "PUT",
-    body: JSON.stringify({ path: state.file.path, content }),
+    body: JSON.stringify({ path: state.file.path, content, clientId: state.clientId }),
   });
   state.file.modified = result.modified;
   state.file.size = result.size;
   state.content = content;
   state.dirty = false;
   state.saving = false;
+  state.localDirtyBlocks.clear();
   setSaveState("Saved", "saved");
   loadDirectory(state.directory).catch(() => {});
 }
@@ -795,25 +1613,22 @@ function setSaveState(text, className) {
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
+    credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
-      "X-Branch-Token": token,
       ...(options.headers || {}),
     },
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401) {
+      if (window.Shoo) window.Shoo.clearIdentity();
+      state.user = null;
+      showAuthView();
+    }
     throw new Error(data.error || `${response.status} ${response.statusText}`);
   }
   return data;
-}
-
-function getCookie(name) {
-  return document.cookie
-    .split(";")
-    .map((part) => part.trim())
-    .find((part) => part.startsWith(name + "="))
-    ?.slice(name.length + 1);
 }
 
 function dirname(path) {

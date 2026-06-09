@@ -8,6 +8,16 @@
   </head>
   <body>
     <div class="app-shell">
+      <main id="auth-view" class="auth-view">
+        <section class="auth-card">
+          <div class="docs-icon">B</div>
+          <h1>Sign in to Branch Docs</h1>
+          <p>Use Shoo to authenticate before browsing or editing files on this server.</p>
+          <button id="signin-button" class="signin-button" type="button">Sign in with Google</button>
+          <small id="auth-detail">Shoo issues a signed token. Branch verifies it server-side.</small>
+        </section>
+      </main>
+
       <header id="docs-topbar" class="docs-topbar">
         <div class="docs-brand">
           <button id="docs-home-menu" class="icon-button" type="button" aria-label="Menu"><span></span><span></span><span></span></button>
@@ -18,7 +28,10 @@
           <span>Search</span>
           <input id="docs-search" type="search" placeholder="Search docs">
         </label>
-        <div class="docs-root" id="docs-root-path">Loading workspace</div>
+        <div class="docs-account">
+          <span class="docs-root" id="docs-root-path">Loading workspace</span>
+          <button id="signout-button" class="text-button" type="button">Sign out</button>
+        </div>
       </header>
 
       <header id="editor-topbar" class="topbar" hidden>
@@ -30,7 +43,10 @@
               <span id="root-path" class="root-path">Loading workspace</span>
             </div>
           </button>
-          <div id="save-state" class="save-state">No file open</div>
+          <div class="doc-status">
+            <div id="collab-presence" class="collab-presence" aria-label="Active collaborators"></div>
+            <div id="save-state" class="save-state">No file open</div>
+          </div>
         </div>
 
         <nav class="menu-row" aria-label="Application menu">
@@ -102,12 +118,14 @@
       </main>
 
       <main id="editor-view" class="stage" hidden>
-        <article class="page-card" aria-label="Document editor">
+        <article id="page-card" class="page-card" aria-label="Document editor">
+          <div id="remote-cursors" class="remote-cursors" aria-hidden="true"></div>
           <div id="editor" class="notion-editor" aria-label="Rendered Markdown editor"></div>
         </article>
       </main>
     </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="https://shoo.dev/shoo.js" data-shoo-pii="true"></script>
     <script src="/app.js"></script>
   </body>
 </html>
