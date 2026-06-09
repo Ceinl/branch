@@ -46,6 +46,10 @@
           <div class="doc-status">
             <div id="collab-presence" class="collab-presence" aria-label="Active collaborators"></div>
             <div id="save-state" class="save-state">No file open</div>
+            <button id="history-toggle" class="history-toggle" type="button" aria-expanded="false" title="Version history (Cmd+Shift+H)">
+              <span class="history-toggle-icon" aria-hidden="true"></span>
+              <span>History</span>
+            </button>
           </div>
         </div>
 
@@ -65,7 +69,7 @@
           <button id="file-new-folder" type="button" role="menuitem"><span class="menu-icon">DIR</span><span>New folder</span></button>
           <div class="menu-separator"></div>
           <button id="file-save" type="button" role="menuitem"><span class="menu-icon">SAVE</span><span>Save</span><small>Cmd+S</small></button>
-          <button type="button" role="menuitem" disabled><span class="menu-icon">VER</span><span>Version history</span></button>
+          <button id="file-history" type="button" role="menuitem"><span class="menu-icon">VER</span><span>Version history</span><small>Cmd+Shift+H</small></button>
           <div class="menu-separator"></div>
           <button type="button" role="menuitem" disabled><span class="menu-icon">i</span><span>Details</span></button>
           <button type="button" role="menuitem" disabled><span class="menu-icon">PR</span><span>Print</span><small>Cmd+P</small></button>
@@ -115,6 +119,22 @@
           <div id="editor" class="notion-editor" aria-label="Rendered Markdown editor"></div>
         </article>
       </main>
+
+      <aside id="history-panel" class="history-panel" hidden aria-label="Version history">
+        <div class="history-header">
+          <strong>Version history</strong>
+          <button id="history-close" class="text-button" type="button">Close</button>
+        </div>
+        <div id="history-graph" class="history-graph" aria-label="Save history tree"></div>
+        <div id="history-empty" class="history-empty" hidden></div>
+        <div id="history-preview" class="history-preview" hidden>
+          <div class="history-preview-bar">
+            <span id="history-preview-meta" class="history-preview-meta"></span>
+            <button id="history-restore" class="history-restore" type="button">Restore</button>
+          </div>
+          <div id="history-preview-body" class="history-preview-body"></div>
+        </div>
+      </aside>
     </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <script src="https://shoo.dev/shoo.js" data-shoo-pii="true"></script>

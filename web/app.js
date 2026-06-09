@@ -27,6 +27,9 @@ const state = {
   streamReady: false,
   remoteCleanupTimer: null,
   config: null,
+  historyOpen: false,
+  historyNodes: [],
+  historySelected: null,
 };
 
 const els = {
@@ -61,6 +64,16 @@ const els = {
   editor: document.getElementById("editor"),
   saveState: document.getElementById("save-state"),
   toast: document.getElementById("toast"),
+  fileHistory: document.getElementById("file-history"),
+  historyToggle: document.getElementById("history-toggle"),
+  historyPanel: document.getElementById("history-panel"),
+  historyClose: document.getElementById("history-close"),
+  historyGraph: document.getElementById("history-graph"),
+  historyEmpty: document.getElementById("history-empty"),
+  historyPreview: document.getElementById("history-preview"),
+  historyPreviewMeta: document.getElementById("history-preview-meta"),
+  historyPreviewBody: document.getElementById("history-preview-body"),
+  historyRestore: document.getElementById("history-restore"),
 };
 
 init().catch((error) => showError(error.message));
@@ -130,6 +143,10 @@ function bindEvents() {
   els.backToDocs.addEventListener("click", () => goToDocs());
   els.fileMenuToggle.addEventListener("click", () => toggleFileMenu());
   els.formatToggle.addEventListener("click", () => toggleFormatPanel());
+  els.fileHistory.addEventListener("click", () => toggleHistoryPanel());
+  els.historyToggle.addEventListener("click", () => toggleHistoryPanel());
+  els.historyClose.addEventListener("click", () => closeHistoryPanel());
+  els.historyRestore.addEventListener("click", () => restoreSelectedVersion());
 
   els.docsSearch.addEventListener("input", () => {
     state.filter = els.docsSearch.value.trim().toLowerCase();
@@ -172,9 +189,14 @@ function bindEvents() {
       event.preventDefault();
       createFile();
     }
+    if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "h") {
+      event.preventDefault();
+      toggleHistoryPanel();
+    }
     if (event.key === "Escape") {
       closeFileMenu();
       closeFormatPanel();
+      closeHistoryPanel();
     }
   });
 
@@ -499,6 +521,7 @@ function showDocsView() {
   disconnectCollab();
   closeFileMenu();
   closeFormatPanel();
+  closeHistoryPanel();
   els.docsTopbar.hidden = false;
   els.docsView.hidden = false;
   els.editorTopbar.hidden = true;
@@ -635,6 +658,11 @@ async function loadFile(path) {
   await loadDirectory(dirname(file.path));
   showEditorView();
   connectCollab(file.path);
+  if (state.historyOpen) {
+    state.historySelected = null;
+    renderHistoryPreview(null);
+    refreshHistory().catch(() => {});
+  }
 }
 
 function connectCollab(path) {
@@ -768,6 +796,9 @@ function handleRemoteDocument(message) {
   state.localDirtyBlocks.clear();
   renderMarkdownDocument(message.content);
   setSaveState(`Updated by ${displayUser(message.user)}`, "saved");
+  if (state.historyOpen) {
+    refreshHistory().catch(() => {});
+  }
 }
 
 function handleRemoteDraft(message) {
@@ -1491,6 +1522,210 @@ async function saveNow() {
   state.localDirtyBlocks.clear();
   setSaveState("Saved", "saved");
   loadDirectory(state.directory).catch(() => {});
+  if (state.historyOpen) {
+    refreshHistory().catch(() => {});
+  }
+}
+
+function toggleHistoryPanel() {
+  if (state.historyOpen) {
+    closeHistoryPanel();
+  } else {
+    openHistoryPanel();
+  }
+}
+
+function openHistoryPanel() {
+  if (state.view !== "editor" || !state.file) return;
+  closeFileMenu();
+  state.historyOpen = true;
+  state.historySelected = null;
+  els.historyPanel.hidden = false;
+  els.historyToggle.classList.add("active");
+  els.historyToggle.setAttribute("aria-expanded", "true");
+  renderHistoryPreview(null);
+  refreshHistory().catch((error) => showError(error.message));
+}
+
+function closeHistoryPanel() {
+  if (!state.historyOpen) return;
+  state.historyOpen = false;
+  state.historySelected = null;
+  els.historyPanel.hidden = true;
+  els.historyToggle.classList.remove("active");
+  els.historyToggle.setAttribute("aria-expanded", "false");
+}
+
+async function refreshHistory() {
+  if (!state.file) return;
+  const data = await api(`/api/file/history?path=${encodeURIComponent(state.file.path)}`);
+  state.historyNodes = data.nodes || [];
+  if (state.historySelected && !state.historyNodes.some((node) => node.id === state.historySelected)) {
+    state.historySelected = null;
+    renderHistoryPreview(null);
+  }
+  if (data.enabled === false) {
+    els.historyEmpty.textContent = "Save history is disabled on this server.";
+  } else {
+    els.historyEmpty.textContent = "No saved versions yet. Versions appear after the first save.";
+  }
+  renderHistoryGraph();
+  const selected = state.historyNodes.find((node) => node.id === state.historySelected);
+  if (selected) {
+    els.historyRestore.disabled = selected.current;
+    els.historyRestore.textContent = selected.current ? "Current version" : "Restore";
+  }
+}
+
+// Lays out the single-parent commit tree: rows are saves (newest first),
+// lanes are branches. A lane "waits" for the parent of the last node it
+// placed; when several lanes wait for the same commit, the branches join.
+function layoutHistoryTree(nodes) {
+  const lanes = [];
+  const rows = [];
+  const edges = [];
+  nodes.forEach((node, row) => {
+    let lane = -1;
+    for (let i = 0; i < lanes.length; i++) {
+      if (lanes[i] && lanes[i].sha === node.id) {
+        if (lane === -1) lane = i;
+        edges.push({ fromRow: lanes[i].childRow, fromLane: i, toRow: row, toLane: lane });
+        if (i !== lane) lanes[i] = null;
+      }
+    }
+    if (lane === -1) {
+      lane = lanes.findIndex((slot) => slot === null);
+      if (lane === -1) lane = lanes.length;
+    }
+    lanes[lane] = node.parent ? { sha: node.parent, childRow: row, childLane: lane } : null;
+    rows.push({ node, row, lane });
+  });
+  const laneCount = Math.max(1, ...rows.map((entry) => entry.lane + 1));
+  return { rows, edges, laneCount };
+}
+
+const HISTORY_ROW_HEIGHT = 46;
+const HISTORY_LANE_WIDTH = 16;
+const HISTORY_GRAPH_PAD = 14;
+
+function historyNodeX(lane) {
+  return HISTORY_GRAPH_PAD + lane * HISTORY_LANE_WIDTH;
+}
+
+function historyNodeY(row) {
+  return row * HISTORY_ROW_HEIGHT + HISTORY_ROW_HEIGHT / 2;
+}
+
+function renderHistoryGraph() {
+  els.historyGraph.innerHTML = "";
+  const nodes = state.historyNodes;
+  els.historyEmpty.hidden = nodes.length > 0;
+  if (!nodes.length) return;
+
+  const { rows, edges, laneCount } = layoutHistoryTree(nodes);
+  const graphWidth = HISTORY_GRAPH_PAD * 2 + (laneCount - 1) * HISTORY_LANE_WIDTH;
+  const height = nodes.length * HISTORY_ROW_HEIGHT;
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "history-svg");
+  svg.setAttribute("width", graphWidth);
+  svg.setAttribute("height", height);
+
+  edges.forEach((edge) => {
+    const x1 = historyNodeX(edge.fromLane);
+    const y1 = historyNodeY(edge.fromRow);
+    const x2 = historyNodeX(edge.toLane);
+    const y2 = historyNodeY(edge.toRow);
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    const bend = Math.min(HISTORY_ROW_HEIGHT / 2, (y2 - y1) / 2);
+    path.setAttribute("d", x1 === x2
+      ? `M ${x1} ${y1} L ${x2} ${y2}`
+      : `M ${x1} ${y1} L ${x1} ${y2 - bend} Q ${x1} ${y2} ${x1 + Math.sign(x2 - x1) * Math.min(Math.abs(x2 - x1), 12)} ${y2} L ${x2} ${y2}`);
+    path.setAttribute("class", "history-edge");
+    svg.append(path);
+  });
+
+  rows.forEach(({ node, row, lane }) => {
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", historyNodeX(lane));
+    circle.setAttribute("cy", historyNodeY(row));
+    circle.setAttribute("r", node.current ? 6 : 4.5);
+    circle.setAttribute("class", `history-node${node.current ? " current" : ""}${node.id === state.historySelected ? " selected" : ""}`);
+    svg.append(circle);
+  });
+
+  els.historyGraph.append(svg);
+
+  rows.forEach(({ node, row }) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `history-row${node.id === state.historySelected ? " selected" : ""}${node.current ? " current" : ""}`;
+    button.style.top = `${row * HISTORY_ROW_HEIGHT}px`;
+    button.style.left = `${graphWidth}px`;
+    const label = node.current ? `<span class="history-badge">Current</span>` : "";
+    button.innerHTML = `
+      <span class="history-row-time">${escapeHTML(formatDate(node.time))}${label}</span>
+      <span class="history-row-author">${escapeHTML(node.author || "")}</span>
+    `;
+    button.addEventListener("click", () => selectHistoryNode(node).catch((error) => showError(error.message)));
+    els.historyGraph.append(button);
+  });
+  els.historyGraph.style.height = `${height}px`;
+}
+
+async function selectHistoryNode(node) {
+  state.historySelected = node.id;
+  renderHistoryGraph();
+  const data = await api(`/api/file/history/content?path=${encodeURIComponent(state.file.path)}&id=${encodeURIComponent(node.id)}`);
+  if (state.historySelected !== node.id) return;
+  renderHistoryPreview(node, data.content || "");
+}
+
+function renderHistoryPreview(node, content) {
+  if (!node) {
+    els.historyPreview.hidden = true;
+    els.historyPreviewBody.innerHTML = "";
+    return;
+  }
+  els.historyPreview.hidden = false;
+  els.historyPreviewMeta.textContent = `${formatDate(node.time)} · ${node.author || ""}`;
+  els.historyRestore.disabled = node.current;
+  els.historyRestore.textContent = node.current ? "Current version" : "Restore";
+  els.historyPreviewBody.innerHTML = "";
+  parseMarkdownBlocks(content || "").forEach((block) => {
+    const el = document.createElement("div");
+    el.className = `block block-${block.type}`;
+    if (block.checked) el.classList.add("checked");
+    el.innerHTML = block.html;
+    els.historyPreviewBody.append(el);
+  });
+  if (!els.historyPreviewBody.children.length) {
+    els.historyPreviewBody.textContent = "Empty document.";
+  }
+}
+
+async function restoreSelectedVersion() {
+  if (!state.file || !state.historySelected) return;
+  if (state.dirty) {
+    const proceed = confirm("You have unsaved edits. Restoring will replace them with the selected version. Continue?");
+    if (!proceed) return;
+  }
+  try {
+    const result = await api("/api/file/restore", {
+      method: "POST",
+      body: JSON.stringify({ path: state.file.path, id: state.historySelected, clientId: state.clientId }),
+    });
+    state.content = result.content || "";
+    state.dirty = false;
+    state.localDirtyBlocks.clear();
+    state.remotePending = null;
+    renderMarkdownDocument(state.content);
+    setSaveState("Restored", "saved");
+    showToast("Restored selected version. New edits will branch from it.");
+    await refreshHistory();
+  } catch (error) {
+    showError(error.message);
+  }
 }
 
 function serializeDocument() {

@@ -23,11 +23,14 @@ After install, the command shape is:
 branch .
 ```
 
-Use another port:
+Use another port, or `:0` for a random free port:
 
 ```sh
 branch --addr 127.0.0.1:9090 .
+branch --open --addr :0 .
 ```
+
+`--open` launches your browser once the server is listening. `branch version` prints the version.
 
 ## Share
 
@@ -68,6 +71,17 @@ branch share https://your-tunnel.trycloudflare.com .
 - Renders Markdown live with headings, lists, tasks, quotes, code blocks, links, and inline formatting.
 - Authenticates shared users with Shoo / Google sign-in and verifies Shoo ID tokens server-side.
 - Shows live drafts, saved changes, collaborator presence, and colored remote cursors for users viewing the same file.
+- Records every save of a Markdown file as a git commit and shows the version history as a tree you can browse and restore from.
+
+## Save history
+
+Every save of a Markdown file is recorded as a real git commit in a hidden bare repository at `.branch/history.git` inside the served folder. Your own files are never touched by git; the history repo only stores snapshots.
+
+Open a file and press the History button (or `Cmd+Shift+H`) to see the version tree. Click a node to preview that version, and Restore to bring it back. Restoring does not delete anything: the next save branches off the restored version, so the history forms a tree rather than a flat list, and every path you ever took is still reachable.
+
+Rapid autosaves from the same client within two minutes coalesce into a single version, so the tree stays readable. Saving identical content creates no new version.
+
+History requires `git` on the server's PATH. Disable it with `--no-history`. The `.branch` folder is hidden from the file list and cannot be opened or edited through the app.
 
 ## Auth
 
