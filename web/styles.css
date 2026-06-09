@@ -83,7 +83,7 @@ button {
 
 .auth-card h1 {
   margin: 24px 0 10px;
-  color: #202124;
+  color: var(--text);
   font-size: 24px;
   font-weight: 400;
 }
@@ -542,7 +542,7 @@ button {
   width: 100%;
   min-height: 38px;
   padding: 0 18px 0 16px;
-  color: #202124;
+  color: var(--text);
   background: transparent;
   font-size: 14px;
   text-align: left;
@@ -817,9 +817,9 @@ button {
   margin: 11px 0;
   padding: 12px;
   overflow: auto;
-  color: #202124;
+  color: var(--text);
   background: var(--surface-dim);
-  border: 1px solid #e8eaed;
+  border: 1px solid var(--line-soft);
   border-radius: 4px;
   font-family: var(--mono);
   font-size: 10pt;
@@ -1342,45 +1342,60 @@ button {
   text-align: center;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #e8eaed;
-    --muted: #9aa0a6;
-    --faint: #80868b;
-    --line: #3f4042;
-    --line-soft: #2e2f31;
-    --chrome: #202124;
-    --toolbar: #2a2b2e;
-    --stage: #161719;
-    --paper: #202124;
-    --blue: #b3568f;
-    --blue-dark: #c97cab;
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.4);
-    --surface: #242528;
-    --surface-dim: #2a2b2e;
-    --hover: #303134;
-    --hover-strong: #3c4043;
-    --text-soft: #dadce0;
-    --accent-soft: #3a2533;
-    --accent-softer: #4a2e41;
-    --diff-add-bg: #1d3325;
-    --diff-add-text: #81c995;
-    --diff-del-bg: #3c2422;
-    --diff-del-text: #f28b82;
-  }
+/* The theme attribute is set by an inline script in index.html before
+   first paint: a saved preference wins, otherwise prefers-color-scheme. */
+:root[data-theme="dark"] {
+  --text: #e8eaed;
+  --muted: #9aa0a6;
+  --faint: #80868b;
+  --line: #3f4042;
+  --line-soft: #2e2f31;
+  --chrome: #202124;
+  --toolbar: #2a2b2e;
+  --stage: #161719;
+  --paper: #202124;
+  --blue: #b3568f;
+  --blue-dark: #c97cab;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.4);
+  --surface: #242528;
+  --surface-dim: #2a2b2e;
+  --hover: #303134;
+  --hover-strong: #3c4043;
+  --text-soft: #dadce0;
+  --accent-soft: #3a2533;
+  --accent-softer: #4a2e41;
+  --diff-add-bg: #1d3325;
+  --diff-add-text: #81c995;
+  --diff-del-bg: #3c2422;
+  --diff-del-text: #f28b82;
+  color-scheme: dark;
+}
 
-  body {
-    color: var(--text);
-  }
+[data-theme="dark"] .new-file-button,
+[data-theme="dark"] .history-restore,
+[data-theme="dark"] .history-badge,
+[data-theme="dark"] .signin-button {
+  color: #fff;
+}
 
-  .new-file-button,
-  .history-restore,
-  .history-badge,
-  .signin-button {
-    color: #fff;
-  }
+[data-theme="dark"] .collab-avatar {
+  border-color: var(--surface);
+}
 
-  .collab-avatar {
-    border-color: var(--surface);
-  }
+.theme-toggle {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  color: var(--text-soft);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.theme-toggle:hover {
+  background: var(--hover);
 }

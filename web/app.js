@@ -79,6 +79,8 @@ const els = {
   historyName: document.getElementById("history-name"),
   historyTabChanges: document.getElementById("history-tab-changes"),
   historyTabDocument: document.getElementById("history-tab-document"),
+  themeToggleDocs: document.getElementById("theme-toggle-docs"),
+  themeToggleEditor: document.getElementById("theme-toggle-editor"),
 };
 
 init().catch((error) => showError(error.message));
@@ -130,6 +132,35 @@ async function loadConfig() {
   return config;
 }
 
+function storedTheme() {
+  try {
+    return localStorage.getItem("branch-theme");
+  } catch (_) {
+    return null;
+  }
+}
+
+function toggleTheme() {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try {
+    localStorage.setItem("branch-theme", next);
+  } catch (_) {
+    // Theme still applies for this page; it just won't persist.
+  }
+  updateThemeButtons();
+}
+
+function updateThemeButtons() {
+  const dark = document.documentElement.dataset.theme === "dark";
+  const icon = dark ? "☀" : "☾";
+  const title = dark ? "Switch to light theme" : "Switch to dark theme";
+  [els.themeToggleDocs, els.themeToggleEditor].forEach((button) => {
+    button.textContent = icon;
+    button.title = title;
+  });
+}
+
 function isReadOnly() {
   return !!state.config?.readOnly;
 }
@@ -175,6 +206,16 @@ function bindEvents() {
   els.historyName.addEventListener("click", () => nameSelectedVersion().catch((error) => showError(error.message)));
   els.historyTabChanges.addEventListener("click", () => setHistoryTab("changes"));
   els.historyTabDocument.addEventListener("click", () => setHistoryTab("document"));
+  els.themeToggleDocs.addEventListener("click", () => toggleTheme());
+  els.themeToggleEditor.addEventListener("click", () => toggleTheme());
+  updateThemeButtons();
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (event) => {
+    // Follow the system only while the user has not picked a theme.
+    if (!storedTheme()) {
+      document.documentElement.dataset.theme = event.matches ? "dark" : "light";
+      updateThemeButtons();
+    }
+  });
 
   els.docsSearch.addEventListener("input", () => {
     state.filter = els.docsSearch.value.trim().toLowerCase();

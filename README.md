@@ -88,7 +88,7 @@ branch share https://your-tunnel.trycloudflare.com .
 
 - Records every save of a Markdown file as a git commit and shows the version history as a tree you can browse, diff, name, and restore from.
 
-- Follows your system theme with a full dark mode.
+- Follows your system theme with a full dark mode, with a toggle to override it.
 
 ## Save history
 

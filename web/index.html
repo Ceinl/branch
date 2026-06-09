@@ -4,6 +4,14 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Branch</title>
+    <script>
+      (function () {
+        var saved = null;
+        try { saved = localStorage.getItem("branch-theme"); } catch (_) {}
+        var dark = saved ? saved === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+      })();
+    </script>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
@@ -30,6 +38,7 @@
         </button>
         <div class="docs-account">
           <span class="docs-root" id="docs-root-path">Loading workspace</span>
+          <button id="theme-toggle-docs" class="theme-toggle" type="button" title="Switch theme" aria-label="Switch between light and dark theme">☾</button>
           <button id="signout-button" class="text-button" type="button">Sign out</button>
         </div>
       </header>
@@ -50,6 +59,7 @@
               <span class="history-toggle-icon" aria-hidden="true"></span>
               <span>History</span>
             </button>
+            <button id="theme-toggle-editor" class="theme-toggle" type="button" title="Switch theme" aria-label="Switch between light and dark theme">☾</button>
           </div>
         </div>
 
