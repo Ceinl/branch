@@ -21,7 +21,49 @@ func testApp(t *testing.T) *app {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &app{root: root, rootReal: rootReal, sessions: newSessionStore(), shoo: newShooVerifier(), collab: newCollabHub()}
+	return &app{root: root, rootReal: rootReal, sessions: newSessionStore(), shoo: newShooVerifier(), collab: newCollabHub(), history: newHistoryStore(root, false)}
+}
+
+func TestReadOnlyRejectsMutations(t *testing.T) {
+	a := testApp(t)
+	a.readOnly = true
+	if err := os.WriteFile(filepath.Join(a.root, "doc.md"), []byte("# hi\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := []*http.Request{
+		httptest.NewRequest(http.MethodPut, "/api/file", strings.NewReader(`{"path":"doc.md","content":"x"}`)),
+		httptest.NewRequest(http.MethodPost, "/api/file", strings.NewReader(`{"path":"new.md","kind":"file"}`)),
+		httptest.NewRequest(http.MethodDelete, "/api/file?path=doc.md", nil),
+		httptest.NewRequest(http.MethodPost, "/api/file/rename", strings.NewReader(`{"path":"doc.md","to":"other.md"}`)),
+		httptest.NewRequest(http.MethodPost, "/api/file/restore", strings.NewReader(`{"path":"doc.md","id":"abc"}`)),
+		httptest.NewRequest(http.MethodPost, "/api/file/history/label", strings.NewReader(`{"path":"doc.md","id":"abc","name":"x"}`)),
+	}
+	for _, r := range requests {
+		w := httptest.NewRecorder()
+		a.handleFile(w, r)
+		switch r.URL.Path {
+		case "/api/file/rename":
+			w = httptest.NewRecorder()
+			a.handleFileRename(w, r)
+		case "/api/file/restore":
+			w = httptest.NewRecorder()
+			a.handleFileRestore(w, r)
+		case "/api/file/history/label":
+			w = httptest.NewRecorder()
+			a.handleFileHistoryLabel(w, r)
+		}
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s %s: got %d, want 403", r.Method, r.URL.Path, w.Code)
+		}
+	}
+
+	// Reads still work.
+	w := httptest.NewRecorder()
+	a.handleFile(w, httptest.NewRequest(http.MethodGet, "/api/file?path=doc.md", nil))
+	if w.Code != http.StatusOK {
+		t.Errorf("read in read-only mode: got %d, want 200", w.Code)
+	}
 }
 
 func TestResolveRejectsPathEscape(t *testing.T) {

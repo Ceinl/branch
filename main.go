@@ -39,6 +39,16 @@ type app struct {
 	collab    *collabHub
 	history   *historyStore
 	allowed   map[string]bool
+	readOnly  bool
+}
+
+// denyReadOnly rejects the request when the server is read-only, so every
+// mutating handler stays guarded even if a client calls the API directly.
+func (a *app) denyReadOnly(w http.ResponseWriter) bool {
+	if a.readOnly {
+		writeError(w, http.StatusForbidden, "server is read-only")
+	}
+	return a.readOnly
 }
 
 // emailAllowed reports whether a verified user may use this server. An empty
@@ -101,6 +111,7 @@ func main() {
 		collab:    newCollabHub(),
 		history:   newHistoryStore(root, !cfg.noHistory),
 		allowed:   parseAllowList(cfg.allow),
+		readOnly:  cfg.readOnly,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleIndex)
@@ -134,7 +145,10 @@ func main() {
 	if cfg.share {
 		fmt.Printf("Listening on %s for shared access\n", listener.Addr())
 	}
-	if a.history.enabled {
+	if a.readOnly {
+		fmt.Println("Read-only mode: editing is disabled")
+	}
+	if a.history.enabled && !a.readOnly {
 		fmt.Printf("Save history in %s\n", filepath.Join(historyDirName, "history.git"))
 	}
 	if cfg.open {
@@ -184,6 +198,7 @@ type cliConfig struct {
 	open      bool
 	noHistory bool
 	allow     string
+	readOnly  bool
 }
 
 func parseCLI() cliConfig {
@@ -208,6 +223,7 @@ func parseServeCLI(args []string) cliConfig {
 	open := fs.Bool("open", false, "open the browser after starting")
 	noHistory := fs.Bool("no-history", false, "disable git-based save history")
 	allow := fs.String("allow", "", "comma-separated emails allowed to sign in (shared mode)")
+	readOnly := fs.Bool("read-only", false, "serve files for reading only, editing disabled")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Branch %s - self-hosted Markdown editor with git-based save history\n\n", appVersion)
 		fmt.Fprintf(fs.Output(), "Usage:\n")
@@ -230,7 +246,7 @@ func parseServeCLI(args []string) cliConfig {
 	if cleanOrigin != "" {
 		validatePublicOrigin(cleanOrigin)
 	}
-	return cliConfig{addr: *addr, origin: cleanOrigin, root: rootArg, open: *open, noHistory: *noHistory, allow: *allow}
+	return cliConfig{addr: *addr, origin: cleanOrigin, root: rootArg, open: *open, noHistory: *noHistory, allow: *allow, readOnly: *readOnly}
 }
 
 func parseShareCLI(args []string) cliConfig {
@@ -239,6 +255,7 @@ func parseShareCLI(args []string) cliConfig {
 	open := fs.Bool("open", false, "open the browser after starting")
 	noHistory := fs.Bool("no-history", false, "disable git-based save history")
 	allow := fs.String("allow", "", "comma-separated emails allowed to sign in")
+	readOnly := fs.Bool("read-only", false, "serve files for reading only, editing disabled")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: branch share [--addr host:port] https://public-url [path]\n")
 		fmt.Fprintf(fs.Output(), "Example: branch share https://docs.example.com .\n\n")
@@ -255,7 +272,7 @@ func parseShareCLI(args []string) cliConfig {
 	if fs.NArg() > 1 {
 		rootArg = fs.Arg(1)
 	}
-	return cliConfig{addr: *addr, origin: origin, root: rootArg, share: true, open: *open, noHistory: *noHistory, allow: *allow}
+	return cliConfig{addr: *addr, origin: origin, root: rootArg, share: true, open: *open, noHistory: *noHistory, allow: *allow, readOnly: *readOnly}
 }
 
 func validatePublicOrigin(origin string) {
@@ -316,6 +333,7 @@ func (a *app) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"redirectURI":   strings.TrimRight(origin, "/") + "/shoo/callback",
 		"hasOriginFlag": a.appOrigin != "",
 		"authRequired":  a.auth,
+		"readOnly":      a.readOnly,
 	})
 }
 
@@ -475,6 +493,9 @@ func (a *app) handleReadFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleSaveFile(w http.ResponseWriter, r *http.Request) {
+	if a.denyReadOnly(w) {
+		return
+	}
 	var req struct {
 		Path         string `json:"path"`
 		Content      string `json:"content"`
@@ -536,6 +557,9 @@ func (a *app) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleCreate(w http.ResponseWriter, r *http.Request) {
+	if a.denyReadOnly(w) {
+		return
+	}
 	var req struct {
 		Path    string `json:"path"`
 		Kind    string `json:"kind"`
@@ -641,6 +665,9 @@ func (a *app) handleFileRestore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if a.denyReadOnly(w) {
+		return
+	}
 	var req struct {
 		Path     string `json:"path"`
 		ID       string `json:"id"`
@@ -713,6 +740,9 @@ func (a *app) handleFileHistoryLabel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if a.denyReadOnly(w) {
+		return
+	}
 	var req struct {
 		Path string `json:"path"`
 		ID   string `json:"id"`
@@ -737,6 +767,9 @@ func (a *app) handleFileHistoryLabel(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleFileRename(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if a.denyReadOnly(w) {
 		return
 	}
 	var req struct {
@@ -783,6 +816,9 @@ func (a *app) handleFileRename(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
+	if a.denyReadOnly(w) {
+		return
+	}
 	full, cleanRel, err := a.resolveExisting(r.URL.Query().Get("path"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

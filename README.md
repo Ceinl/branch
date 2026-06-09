@@ -32,6 +32,13 @@ branch --open --addr :0 .
 
 `--open` launches your browser once the server is listening. `branch version` prints the version.
 
+Serve a folder for reading only — browsing and live updates work, but saving, creating, renaming, deleting, and restoring are disabled both in the UI and at the API:
+
+```
+branch --read-only .
+branch share --read-only https://docs.example.com .
+```
+
 ## Share
 
 Local mode skips authentication and is meant for your own machine:

@@ -323,6 +323,11 @@ func (a *app) handleFileCollab(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	// Read-only viewers may share their cursor but never push draft content.
+	if req.Content != nil && a.readOnly {
+		writeError(w, http.StatusForbidden, "server is read-only")
+		return
+	}
 	if req.Content != nil {
 		if len(*req.Content) > maxEditableBytes {
 			writeError(w, http.StatusRequestEntityTooLarge, "content is too large for the editor")

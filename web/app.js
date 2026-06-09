@@ -107,6 +107,7 @@ async function init() {
   bindEvents();
   state.config = await loadConfig();
   configureShoo();
+  applyReadOnlyUI();
   const signedIn = await establishSession();
   if (!signedIn) {
     showAuthView();
@@ -127,6 +128,23 @@ async function loadConfig() {
     throw new Error(config.error || "Failed to load Branch config");
   }
   return config;
+}
+
+function isReadOnly() {
+  return !!state.config?.readOnly;
+}
+
+function applyReadOnlyUI() {
+  if (!isReadOnly()) return;
+  els.homeNewDoc.hidden = true;
+  els.homeNewFolder.hidden = true;
+  els.fileNewDoc.hidden = true;
+  els.fileNewFolder.hidden = true;
+  els.fileSave.hidden = true;
+  els.fileRename.hidden = true;
+  els.fileDelete.hidden = true;
+  els.historyName.hidden = true;
+  els.historyRestore.hidden = true;
 }
 
 function configureShoo() {
@@ -164,7 +182,7 @@ function bindEvents() {
   });
 
   els.editor.addEventListener("click", () => {
-    if (!state.file && !els.editor.querySelector(".block")) {
+    if (!state.file && !els.editor.querySelector(".block") && !isReadOnly()) {
       insertBlock("p", "", null).focus();
     }
     scheduleCollabPresence();
@@ -657,7 +675,7 @@ function docsRow(item, isParent) {
       open();
     }
   });
-  if (!isParent) {
+  if (!isParent && !isReadOnly()) {
     const actions = document.createElement("span");
     actions.className = "docs-row-actions";
     if (!isDirectory) {
@@ -742,7 +760,7 @@ async function loadFile(path) {
   els.title.value = file.name || basename(file.path);
   els.rootPath.textContent = file.path;
   renderMarkdownDocument(state.content);
-  setSaveState("Saved", "saved");
+  setSaveState(isReadOnly() ? "Read-only" : "Saved", "saved");
   await loadDirectory(dirname(file.path));
   showEditorView();
   connectCollab(file.path);
@@ -985,7 +1003,7 @@ function isProtectedBlock(block) {
 }
 
 function scheduleCollabDraft() {
-  if (!state.file || !state.stream) return;
+  if (!state.file || !state.stream || isReadOnly()) return;
   clearTimeout(state.collabTimer);
   state.collabTimer = setTimeout(() => sendCollabDraft().catch(() => {}), 120);
 }
@@ -1201,6 +1219,7 @@ function displayUser(user) {
 
 async function createFile() {
   closeFileMenu();
+  if (isReadOnly()) return;
   const name = prompt("New Markdown filename", uniqueDocName());
   if (!name) return;
   const path = joinPath(state.directory, ensureMarkdownName(name.trim()));
@@ -1219,6 +1238,7 @@ async function createFile() {
 
 async function createFolder() {
   closeFileMenu();
+  if (isReadOnly()) return;
   const name = prompt("New folder name", "notes");
   if (!name) return;
   const path = joinPath(state.directory, name.trim());
@@ -1327,7 +1347,7 @@ function createBlock(type, html = "", checked = false) {
   block.className = `block block-${type}`;
   block.dataset.type = type;
   block.dataset.placeholder = placeholderForType(type);
-  block.contentEditable = "true";
+  block.contentEditable = isReadOnly() ? "false" : "true";
   block.spellcheck = type !== "code";
   if (checked) {
     block.classList.add("checked");
@@ -1562,7 +1582,7 @@ function wrapSelectionWith(tag) {
 }
 
 function markChanged() {
-  if (!state.file) return;
+  if (!state.file || isReadOnly()) return;
   const block = currentSelectionBlock() || state.activeBlock;
   if (block) {
     state.localDirtyBlocks.add(block);
@@ -1582,6 +1602,7 @@ function scheduleSave() {
 async function saveNow() {
   clearTimeout(state.saveTimer);
   closeFileMenu();
+  if (isReadOnly()) return;
   if (!state.file) {
     setSaveState("Open or create a file", "error");
     return;
