@@ -1064,7 +1064,7 @@ function initialsForUser(user) {
 }
 
 function colorForClient(clientId) {
-  const palette = ["#1a73e8", "#d93025", "#188038", "#9334e6", "#f29900", "#00acc1", "#e52592", "#5f6368"];
+  const palette = ["#7b245f", "#d93025", "#188038", "#9334e6", "#f29900", "#00acc1", "#e52592", "#5f6368"];
   let hash = 0;
   for (const char of clientId) {
     hash = (hash * 31 + char.charCodeAt(0)) >>> 0;

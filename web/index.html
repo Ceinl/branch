@@ -19,15 +19,15 @@
       </main>
 
       <header id="docs-topbar" class="docs-topbar">
-        <div class="docs-brand">
-          <button id="docs-home-menu" class="icon-button" type="button" aria-label="Menu"><span></span><span></span><span></span></button>
-          <div class="docs-icon">B</div>
-          <strong>Branch Docs</strong>
-        </div>
+        <div class="docs-topbar-spacer" aria-hidden="true"></div>
         <label class="search-box">
           <span>Search</span>
           <input id="docs-search" type="search" placeholder="Search docs">
         </label>
+        <button id="home-new-doc" class="new-file-button" type="button" aria-label="Create new file">
+          <span class="new-file-icon" aria-hidden="true"></span>
+          <span>New file</span>
+        </button>
         <div class="docs-account">
           <span class="docs-root" id="docs-root-path">Loading workspace</span>
           <button id="signout-button" class="text-button" type="button">Sign out</button>
@@ -93,14 +93,6 @@
       </header>
 
       <main id="docs-view" class="docs-view">
-        <section class="template-area">
-          <div class="docs-section-heading">New document</div>
-          <button id="home-new-doc" class="blank-template" type="button" aria-label="Create new document">
-            <span class="plus-mark"><i></i><b></b></span>
-          </button>
-          <span class="template-label">Blank document</span>
-        </section>
-
         <section class="docs-list-card">
           <div class="docs-list-toolbar">
             <nav id="docs-breadcrumbs" class="docs-breadcrumbs" aria-label="Folder breadcrumb"></nav>
