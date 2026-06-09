@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -87,5 +88,76 @@ func TestHistoryTreeBranchesAfterRestore(t *testing.T) {
 	}
 	if _, err := store.contentAt("notes/other.md", v3); err == nil {
 		t.Fatal("expected error for id from another file")
+	}
+}
+
+func TestHistoryDiffLabelRename(t *testing.T) {
+	store := newHistoryStore(t.TempDir(), true)
+	if !store.enabled {
+		t.Skip("git not available")
+	}
+	user := authUser{Name: "Tester", Email: "tester@example.com"}
+
+	v1, err := store.recordSave("a.md", "alpha\n", user, "c1")
+	if err != nil {
+		t.Fatalf("save v1: %v", err)
+	}
+	v2, err := store.recordSave("a.md", "alpha\nbeta\n", user, "c2")
+	if err != nil {
+		t.Fatalf("save v2: %v", err)
+	}
+
+	diff, err := store.diff("a.md", v2)
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	if !strings.Contains(diff, "+beta") || strings.Contains(diff, "+alpha") {
+		t.Fatalf("diff vs parent wrong:\n%s", diff)
+	}
+	rootDiff, err := store.diff("a.md", v1)
+	if err != nil || !strings.Contains(rootDiff, "+alpha") {
+		t.Fatalf("root diff should add everything: %v\n%s", err, rootDiff)
+	}
+
+	if err := store.setLabel("a.md", v1, "  first   draft "); err != nil {
+		t.Fatalf("label: %v", err)
+	}
+	nodes, err := store.list("a.md")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	byID := map[string]historyNode{}
+	for _, node := range nodes {
+		byID[node.ID] = node
+	}
+	if byID[v1].Name != "first draft" {
+		t.Fatalf("label = %q", byID[v1].Name)
+	}
+	if byID[v2].Additions != 1 || byID[v2].Deletions != 0 {
+		t.Fatalf("numstat v2 = +%d -%d", byID[v2].Additions, byID[v2].Deletions)
+	}
+	if err := store.setLabel("a.md", v1, ""); err != nil {
+		t.Fatalf("clear label: %v", err)
+	}
+	nodes, _ = store.list("a.md")
+	for _, node := range nodes {
+		if node.Name != "" {
+			t.Fatalf("label should be removed, got %q", node.Name)
+		}
+	}
+
+	if err := store.rename("a.md", "b.md"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	moved, err := store.list("b.md")
+	if err != nil || len(moved) != 2 {
+		t.Fatalf("history did not follow rename: %v, %d nodes", err, len(moved))
+	}
+	if !moved[0].Current {
+		t.Fatal("current pointer lost in rename")
+	}
+	old, _ := store.list("a.md")
+	if len(old) != 0 {
+		t.Fatalf("old path still has %d nodes", len(old))
 	}
 }

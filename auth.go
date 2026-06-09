@@ -267,6 +267,10 @@ func (a *app) handleSession(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, err.Error())
 			return
 		}
+		if !a.emailAllowed(user.Email) {
+			writeError(w, http.StatusForbidden, "this account is not allowed on this server")
+			return
+		}
 		sessionToken, err := a.sessions.create(user, exp)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())

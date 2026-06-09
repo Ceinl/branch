@@ -30,14 +30,18 @@ type historyStore struct {
 	gitDir  string
 	enabled bool
 	ready   bool
+	gcOnce  sync.Once
 }
 
 type historyNode struct {
-	ID      string `json:"id"`
-	Parent  string `json:"parent,omitempty"`
-	Time    string `json:"time"`
-	Author  string `json:"author"`
-	Current bool   `json:"current"`
+	ID        string `json:"id"`
+	Parent    string `json:"parent,omitempty"`
+	Time      string `json:"time"`
+	Author    string `json:"author"`
+	Current   bool   `json:"current"`
+	Name      string `json:"name,omitempty"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
 }
 
 func newHistoryStore(root string, enabled bool) *historyStore {
@@ -69,6 +73,11 @@ func (s *historyStore) ensureRepoLocked() error {
 		}
 	}
 	s.ready = true
+	// Coalesced saves leave unreachable commits behind; let git clean them
+	// up occasionally so the history repo does not grow forever.
+	s.gcOnce.Do(func() {
+		go func() { _, _ = s.git(nil, nil, "gc", "--auto", "--quiet") }()
+	})
 	return nil
 }
 
@@ -218,26 +227,122 @@ func (s *historyStore) list(path string) ([]historyNode, error) {
 	tips := strings.Fields(tipsRaw)
 	cur, _ := s.git(nil, nil, "rev-parse", "--verify", "--quiet", "refs/cur/"+key)
 
-	args := append([]string{"log", "--date-order", "--format=%H%x00%P%x00%aI%x00%an"}, tips...)
+	args := append([]string{
+		"log", "--date-order", "--numstat", "--notes=labels",
+		"--format=%x01%H%x00%P%x00%aI%x00%an%x00%N%x02",
+	}, tips...)
 	out, err := s.git(nil, nil, args...)
 	if err != nil {
 		return nil, err
 	}
 	nodes := []historyNode{}
-	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "\x00", 4)
-		if len(parts) != 4 {
+	for _, record := range strings.Split(out, "\x01") {
+		head, rest, found := strings.Cut(record, "\x02")
+		if !found {
 			continue
 		}
-		nodes = append(nodes, historyNode{
+		parts := strings.SplitN(head, "\x00", 5)
+		if len(parts) != 5 {
+			continue
+		}
+		node := historyNode{
 			ID:      parts[0],
 			Parent:  firstField(parts[1]),
 			Time:    parts[2],
 			Author:  parts[3],
+			Name:    strings.TrimSpace(parts[4]),
 			Current: parts[0] == cur,
-		})
+		}
+		// --numstat lines after the format: "<added>\t<deleted>\t<file>"
+		for _, line := range strings.Split(rest, "\n") {
+			fields := strings.SplitN(line, "\t", 3)
+			if len(fields) != 3 {
+				continue
+			}
+			node.Additions, _ = strconv.Atoi(fields[0])
+			node.Deletions, _ = strconv.Atoi(fields[1])
+		}
+		nodes = append(nodes, node)
 	}
 	return nodes, nil
+}
+
+// The sha of git's well-known empty tree, used to diff root commits.
+const emptyTreeID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+// diff returns the unified diff a save introduced relative to its parent.
+func (s *historyStore) diff(path string, id string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureRepoLocked(); err != nil {
+		return "", err
+	}
+	if !commitIDPattern.MatchString(id) {
+		return "", errors.New("invalid version id")
+	}
+	if !s.belongsToFileLocked(path, id) {
+		return "", errors.New("version not found for this file")
+	}
+	base, err := s.git(nil, nil, "rev-parse", "--verify", "--quiet", id+"^")
+	if err != nil {
+		base = emptyTreeID
+	}
+	return s.gitRaw(nil, nil, "diff", "--no-color", base, id, "--", "content.md")
+}
+
+// setLabel names a version (empty name removes it). Stored as a git note so
+// the commit id stays stable.
+func (s *historyStore) setLabel(path string, id string, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureRepoLocked(); err != nil {
+		return err
+	}
+	if !commitIDPattern.MatchString(id) {
+		return errors.New("invalid version id")
+	}
+	if !s.belongsToFileLocked(path, id) {
+		return errors.New("version not found for this file")
+	}
+	name = strings.Join(strings.Fields(name), " ")
+	if len(name) > 120 {
+		name = name[:120]
+	}
+	if name == "" {
+		_, _ = s.git(nil, nil, "notes", "--ref=labels", "remove", "--ignore-missing", id)
+		return nil
+	}
+	_, err := s.git(nil, nil, "notes", "--ref=labels", "add", "-f", "-m", name, id)
+	return err
+}
+
+// rename moves a file's entire version tree to a new path key.
+func (s *historyStore) rename(oldPath string, newPath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureRepoLocked(); err != nil {
+		return err
+	}
+	oldKey := historyKey(oldPath)
+	newKey := historyKey(newPath)
+	out, err := s.git(nil, nil, "for-each-ref", "--format=%(refname) %(objectname)", "refs/tips/"+oldKey, "refs/cur/"+oldKey)
+	if err != nil || out == "" {
+		return err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		ref, sha, found := strings.Cut(line, " ")
+		if !found {
+			continue
+		}
+		newRef := strings.Replace(ref, oldKey, newKey, 1)
+		if _, err := s.git(nil, nil, "update-ref", newRef, sha); err != nil {
+			return err
+		}
+		if _, err := s.git(nil, nil, "update-ref", "-d", ref); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func firstField(value string) string {

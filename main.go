@@ -38,6 +38,27 @@ type app struct {
 	shoo      *shooVerifier
 	collab    *collabHub
 	history   *historyStore
+	allowed   map[string]bool
+}
+
+// emailAllowed reports whether a verified user may use this server. An empty
+// allowlist admits every authenticated user.
+func (a *app) emailAllowed(email string) bool {
+	if len(a.allowed) == 0 {
+		return true
+	}
+	return a.allowed[strings.ToLower(strings.TrimSpace(email))]
+}
+
+func parseAllowList(value string) map[string]bool {
+	allowed := map[string]bool{}
+	for _, email := range strings.Split(value, ",") {
+		email = strings.ToLower(strings.TrimSpace(email))
+		if email != "" {
+			allowed[email] = true
+		}
+	}
+	return allowed
 }
 
 type fileEntry struct {
@@ -79,6 +100,7 @@ func main() {
 		shoo:      newShooVerifier(),
 		collab:    newCollabHub(),
 		history:   newHistoryStore(root, !cfg.noHistory),
+		allowed:   parseAllowList(cfg.allow),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleIndex)
@@ -94,7 +116,10 @@ func main() {
 	mux.HandleFunc("/api/file/stream", a.withAuth(a.handleFileStream))
 	mux.HandleFunc("/api/file/history", a.withAPI(a.handleFileHistory))
 	mux.HandleFunc("/api/file/history/content", a.withAPI(a.handleFileHistoryContent))
+	mux.HandleFunc("/api/file/history/diff", a.withAPI(a.handleFileHistoryDiff))
+	mux.HandleFunc("/api/file/history/label", a.withAPI(a.handleFileHistoryLabel))
 	mux.HandleFunc("/api/file/restore", a.withAPI(a.handleFileRestore))
+	mux.HandleFunc("/api/file/rename", a.withAPI(a.handleFileRename))
 
 	listener, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
@@ -158,6 +183,7 @@ type cliConfig struct {
 	share     bool
 	open      bool
 	noHistory bool
+	allow     string
 }
 
 func parseCLI() cliConfig {
@@ -181,6 +207,7 @@ func parseServeCLI(args []string) cliConfig {
 	origin := fs.String("origin", "", "public origin for Shoo auth, e.g. https://docs.example.com")
 	open := fs.Bool("open", false, "open the browser after starting")
 	noHistory := fs.Bool("no-history", false, "disable git-based save history")
+	allow := fs.String("allow", "", "comma-separated emails allowed to sign in (shared mode)")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Branch %s - self-hosted Markdown editor with git-based save history\n\n", appVersion)
 		fmt.Fprintf(fs.Output(), "Usage:\n")
@@ -203,7 +230,7 @@ func parseServeCLI(args []string) cliConfig {
 	if cleanOrigin != "" {
 		validatePublicOrigin(cleanOrigin)
 	}
-	return cliConfig{addr: *addr, origin: cleanOrigin, root: rootArg, open: *open, noHistory: *noHistory}
+	return cliConfig{addr: *addr, origin: cleanOrigin, root: rootArg, open: *open, noHistory: *noHistory, allow: *allow}
 }
 
 func parseShareCLI(args []string) cliConfig {
@@ -211,6 +238,7 @@ func parseShareCLI(args []string) cliConfig {
 	addr := fs.String("addr", "0.0.0.0:8080", "address to listen on")
 	open := fs.Bool("open", false, "open the browser after starting")
 	noHistory := fs.Bool("no-history", false, "disable git-based save history")
+	allow := fs.String("allow", "", "comma-separated emails allowed to sign in")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: branch share [--addr host:port] https://public-url [path]\n")
 		fmt.Fprintf(fs.Output(), "Example: branch share https://docs.example.com .\n\n")
@@ -227,7 +255,7 @@ func parseShareCLI(args []string) cliConfig {
 	if fs.NArg() > 1 {
 		rootArg = fs.Arg(1)
 	}
-	return cliConfig{addr: *addr, origin: origin, root: rootArg, share: true, open: *open, noHistory: *noHistory}
+	return cliConfig{addr: *addr, origin: origin, root: rootArg, share: true, open: *open, noHistory: *noHistory, allow: *allow}
 }
 
 func validatePublicOrigin(origin string) {
@@ -400,6 +428,8 @@ func (a *app) handleFile(w http.ResponseWriter, r *http.Request) {
 		a.handleSaveFile(w, r)
 	case http.MethodPost:
 		a.handleCreate(w, r)
+	case http.MethodDelete:
+		a.handleDeleteFile(w, r)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -446,9 +476,11 @@ func (a *app) handleReadFile(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Path     string `json:"path"`
-		Content  string `json:"content"`
-		ClientID string `json:"clientId"`
+		Path         string `json:"path"`
+		Content      string `json:"content"`
+		ClientID     string `json:"clientId"`
+		BaseModified string `json:"baseModified"`
+		Force        bool   `json:"force"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -470,6 +502,13 @@ func (a *app) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		mode = info.Mode().Perm()
+		// Optimistic concurrency: reject the save if the file changed since
+		// the client last loaded it, unless the client insists.
+		current := info.ModTime().Format(time.RFC3339)
+		if !req.Force && req.BaseModified != "" && req.BaseModified != current {
+			writeError(w, http.StatusConflict, "file changed since it was loaded")
+			return
+		}
 	}
 	if err := atomicWrite(full, []byte(req.Content), mode); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -645,6 +684,137 @@ func (a *app) handleFileRestore(w http.ResponseWriter, r *http.Request) {
 		"modified": info.ModTime().Format(time.RFC3339),
 	})
 	a.collab.broadcastUpdate(slashPath(cleanRel), content, info.ModTime().Format(time.RFC3339), userFromRequest(r), req.ClientID)
+}
+
+func (a *app) handleFileHistoryDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	_, cleanRel, err := a.resolveExisting(r.URL.Query().Get("path"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	diff, err := a.history.diff(slashPath(cleanRel), r.URL.Query().Get("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path": slashPath(cleanRel),
+		"id":   r.URL.Query().Get("id"),
+		"diff": diff,
+	})
+}
+
+func (a *app) handleFileHistoryLabel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		Path string `json:"path"`
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	_, cleanRel, err := a.resolveExisting(req.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := a.history.setLabel(slashPath(cleanRel), req.ID, req.Name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": slashPath(cleanRel), "id": req.ID, "name": req.Name})
+}
+
+func (a *app) handleFileRename(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		Path string `json:"path"`
+		To   string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	full, cleanRel, err := a.resolveExisting(req.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	info, err := os.Stat(full)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if info.IsDir() {
+		writeError(w, http.StatusBadRequest, "renaming folders is not supported yet")
+		return
+	}
+	target, targetRel, err := a.resolveWritable(req.To)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := os.Lstat(target); err == nil {
+		writeError(w, http.StatusConflict, "a file with that name already exists")
+		return
+	}
+	if err := os.Rename(full, target); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if a.history.enabled {
+		if err := a.history.rename(slashPath(cleanRel), slashPath(targetRel)); err != nil {
+			log.Printf("history: rename %s to %s: %v", slashPath(cleanRel), slashPath(targetRel), err)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"path": slashPath(targetRel)})
+}
+
+func (a *app) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
+	full, cleanRel, err := a.resolveExisting(r.URL.Query().Get("path"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if cleanRel == "" {
+		writeError(w, http.StatusBadRequest, "refusing to delete server root")
+		return
+	}
+	info, err := os.Stat(full)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if info.IsDir() {
+		entries, err := os.ReadDir(full)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if len(entries) > 0 {
+			writeError(w, http.StatusBadRequest, "folder is not empty")
+			return
+		}
+	}
+	// History refs are kept on purpose: recreating the file at the same path
+	// continues its old version tree.
+	if err := os.Remove(full); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"path": slashPath(cleanRel)})
 }
 
 func (a *app) resolveExisting(rel string) (string, string, error) {
