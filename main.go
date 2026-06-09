@@ -11,10 +11,13 @@ import (
 	"io/fs"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -34,6 +37,7 @@ type app struct {
 	sessions  *sessionStore
 	shoo      *shooVerifier
 	collab    *collabHub
+	history   *historyStore
 }
 
 type fileEntry struct {
@@ -74,6 +78,7 @@ func main() {
 		sessions:  newSessionStore(),
 		shoo:      newShooVerifier(),
 		collab:    newCollabHub(),
+		history:   newHistoryStore(root, !cfg.noHistory),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleIndex)
@@ -87,46 +92,106 @@ func main() {
 	mux.HandleFunc("/api/file", a.withAPI(a.handleFile))
 	mux.HandleFunc("/api/file/collab", a.withAPI(a.handleFileCollab))
 	mux.HandleFunc("/api/file/stream", a.withAuth(a.handleFileStream))
+	mux.HandleFunc("/api/file/history", a.withAPI(a.handleFileHistory))
+	mux.HandleFunc("/api/file/history/content", a.withAPI(a.handleFileHistoryContent))
+	mux.HandleFunc("/api/file/restore", a.withAPI(a.handleFileRestore))
 
-	openURL := fmt.Sprintf("http://%s/", cfg.addr)
+	listener, err := net.Listen("tcp", cfg.addr)
+	if err != nil {
+		log.Fatalf("listen on %s: %v", cfg.addr, err)
+	}
+	openURL := fmt.Sprintf("http://%s/", listenerHost(listener))
 	if cfg.origin != "" {
 		openURL = cfg.origin
 	}
-	fmt.Printf("Branch serving %s\n", root)
+	fmt.Printf("Branch %s serving %s\n", appVersion, root)
 	fmt.Printf("Open %s\n", openURL)
 	if cfg.share {
-		fmt.Printf("Listening on %s for shared access\n", cfg.addr)
+		fmt.Printf("Listening on %s for shared access\n", listener.Addr())
 	}
-	if err := http.ListenAndServe(cfg.addr, mux); err != nil {
+	if a.history.enabled {
+		fmt.Printf("Save history in %s\n", filepath.Join(historyDirName, "history.git"))
+	}
+	if cfg.open {
+		openBrowser(openURL)
+	}
+	if err := http.Serve(listener, mux); err != nil {
 		log.Fatal(err)
 	}
 }
 
+// listenerHost rewrites wildcard listen addresses into something a browser
+// can actually open, keeping the real (possibly auto-assigned) port.
+func listenerHost(listener net.Listener) string {
+	addr := listener.Addr().String()
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if host == "::" || host == "0.0.0.0" || host == "" {
+		host = "localhost"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Printf("Could not open browser: %v\n", err)
+	}
+}
+
+const appVersion = "0.2.0"
+
 type cliConfig struct {
-	addr   string
-	origin string
-	root   string
-	share  bool
+	addr      string
+	origin    string
+	root      string
+	share     bool
+	open      bool
+	noHistory bool
 }
 
 func parseCLI() cliConfig {
-	if len(os.Args) > 1 && os.Args[1] == "share" {
-		return parseShareCLI(os.Args[2:])
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "share":
+			return parseShareCLI(os.Args[2:])
+		case "version", "--version", "-v":
+			fmt.Printf("branch %s\n", appVersion)
+			os.Exit(0)
+		case "help", "--help", "-h":
+			parseServeCLI([]string{"--help"})
+		}
 	}
 	return parseServeCLI(os.Args[1:])
 }
 
 func parseServeCLI(args []string) cliConfig {
 	fs := flag.NewFlagSet("branch", flag.ExitOnError)
-	addr := fs.String("addr", "127.0.0.1:8080", "address to listen on")
+	addr := fs.String("addr", "127.0.0.1:8080", "address to listen on (use :0 for a random port)")
 	origin := fs.String("origin", "", "public origin for Shoo auth, e.g. https://docs.example.com")
+	open := fs.Bool("open", false, "open the browser after starting")
+	noHistory := fs.Bool("no-history", false, "disable git-based save history")
 	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Branch %s - self-hosted Markdown editor with git-based save history\n\n", appVersion)
 		fmt.Fprintf(fs.Output(), "Usage:\n")
-		fmt.Fprintf(fs.Output(), "  branch [--addr host:port] [--origin https://host] [path]\n")
-		fmt.Fprintf(fs.Output(), "  branch share https://public-url [path]\n\n")
+		fmt.Fprintf(fs.Output(), "  branch [flags] [path]              serve a folder locally\n")
+		fmt.Fprintf(fs.Output(), "  branch share https://url [path]    serve with Shoo sign-in for collaborators\n")
+		fmt.Fprintf(fs.Output(), "  branch version                     print the version\n\n")
 		fmt.Fprintf(fs.Output(), "Examples:\n")
 		fmt.Fprintf(fs.Output(), "  branch .\n")
+		fmt.Fprintf(fs.Output(), "  branch --open --addr :0 ~/notes\n")
 		fmt.Fprintf(fs.Output(), "  branch share https://docs.example.com .\n\n")
+		fmt.Fprintf(fs.Output(), "Flags:\n")
 		fs.PrintDefaults()
 	}
 	_ = fs.Parse(args)
@@ -138,12 +203,14 @@ func parseServeCLI(args []string) cliConfig {
 	if cleanOrigin != "" {
 		validatePublicOrigin(cleanOrigin)
 	}
-	return cliConfig{addr: *addr, origin: cleanOrigin, root: rootArg}
+	return cliConfig{addr: *addr, origin: cleanOrigin, root: rootArg, open: *open, noHistory: *noHistory}
 }
 
 func parseShareCLI(args []string) cliConfig {
 	fs := flag.NewFlagSet("branch share", flag.ExitOnError)
 	addr := fs.String("addr", "0.0.0.0:8080", "address to listen on")
+	open := fs.Bool("open", false, "open the browser after starting")
+	noHistory := fs.Bool("no-history", false, "disable git-based save history")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: branch share [--addr host:port] https://public-url [path]\n")
 		fmt.Fprintf(fs.Output(), "Example: branch share https://docs.example.com .\n\n")
@@ -160,7 +227,7 @@ func parseShareCLI(args []string) cliConfig {
 	if fs.NArg() > 1 {
 		rootArg = fs.Arg(1)
 	}
-	return cliConfig{addr: *addr, origin: origin, root: rootArg, share: true}
+	return cliConfig{addr: *addr, origin: origin, root: rootArg, share: true, open: *open, noHistory: *noHistory}
 }
 
 func validatePublicOrigin(origin string) {
@@ -292,6 +359,9 @@ func (a *app) handleFiles(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		name := entry.Name()
+		if cleanRel == "" && name == historyDirName {
+			continue
+		}
 		childRel := joinRel(cleanRel, name)
 		kind := "file"
 		if entry.IsDir() {
@@ -410,10 +480,18 @@ func (a *app) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	versionID := ""
+	if a.history.enabled && isMarkdown(cleanRel) {
+		versionID, err = a.history.recordSave(slashPath(cleanRel), req.Content, userFromRequest(r), req.ClientID)
+		if err != nil {
+			log.Printf("history: record save of %s: %v", slashPath(cleanRel), err)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"path":     slashPath(cleanRel),
 		"size":     info.Size(),
 		"modified": info.ModTime().Format(time.RFC3339),
+		"version":  versionID,
 	})
 	a.collab.broadcastUpdate(slashPath(cleanRel), req.Content, info.ModTime().Format(time.RFC3339), userFromRequest(r), req.ClientID)
 }
@@ -467,7 +545,106 @@ func (a *app) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "kind must be file or directory")
 		return
 	}
+	if req.Kind == "file" && a.history.enabled && isMarkdown(cleanRel) {
+		if _, err := a.history.recordSave(slashPath(cleanRel), req.Content, userFromRequest(r), ""); err != nil {
+			log.Printf("history: record create of %s: %v", slashPath(cleanRel), err)
+		}
+	}
 	writeJSON(w, http.StatusCreated, map[string]string{"path": slashPath(cleanRel)})
+}
+
+func (a *app) handleFileHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	_, cleanRel, err := a.resolveExisting(r.URL.Query().Get("path"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !a.history.enabled {
+		writeJSON(w, http.StatusOK, map[string]any{"path": slashPath(cleanRel), "enabled": false, "nodes": []historyNode{}})
+		return
+	}
+	nodes, err := a.history.list(slashPath(cleanRel))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": slashPath(cleanRel), "enabled": true, "nodes": nodes})
+}
+
+func (a *app) handleFileHistoryContent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	_, cleanRel, err := a.resolveExisting(r.URL.Query().Get("path"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	content, err := a.history.contentAt(slashPath(cleanRel), r.URL.Query().Get("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path":    slashPath(cleanRel),
+		"id":      r.URL.Query().Get("id"),
+		"content": content,
+	})
+}
+
+func (a *app) handleFileRestore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		Path     string `json:"path"`
+		ID       string `json:"id"`
+		ClientID string `json:"clientId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	full, cleanRel, err := a.resolveWritable(req.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	mode := fs.FileMode(0644)
+	if info, err := os.Stat(full); err == nil {
+		if info.IsDir() {
+			writeError(w, http.StatusBadRequest, "path is a directory")
+			return
+		}
+		mode = info.Mode().Perm()
+	}
+	content, err := a.history.restore(slashPath(cleanRel), req.ID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err := atomicWrite(full, []byte(content), mode); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	info, err := os.Stat(full)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path":     slashPath(cleanRel),
+		"id":       req.ID,
+		"content":  content,
+		"modified": info.ModTime().Format(time.RFC3339),
+	})
+	a.collab.broadcastUpdate(slashPath(cleanRel), content, info.ModTime().Format(time.RFC3339), userFromRequest(r), req.ClientID)
 }
 
 func (a *app) resolveExisting(rel string) (string, string, error) {
@@ -525,6 +702,9 @@ func (a *app) resolveLexical(rel string) (string, string, error) {
 	cleanRel := filepath.Clean(rel)
 	if cleanRel == "." {
 		cleanRel = ""
+	}
+	if cleanRel == historyDirName || strings.HasPrefix(cleanRel, historyDirName+string(filepath.Separator)) {
+		return "", "", errors.New("path is reserved for Branch internals")
 	}
 	full := filepath.Join(a.root, cleanRel)
 	fullAbs, err := filepath.Abs(full)
