@@ -28,6 +28,8 @@ const state = {
   remoteCleanupTimer: null,
   config: null,
   suppressHashChange: false,
+  searchTimer: null,
+  searchResults: null,
   historyOpen: false,
   historyNodes: [],
   historySelected: null,
@@ -273,7 +275,12 @@ function bindEvents() {
 
   els.docsSearch.addEventListener("input", () => {
     state.filter = els.docsSearch.value.trim().toLowerCase();
+    state.searchResults = null;
     renderDocsList();
+    clearTimeout(state.searchTimer);
+    if (state.filter) {
+      state.searchTimer = setTimeout(() => runWorkspaceSearch(state.filter), 250);
+    }
   });
 
   els.editor.addEventListener("click", () => {
@@ -721,12 +728,25 @@ function crumbButton(label, path) {
   return button;
 }
 
+async function runWorkspaceSearch(query) {
+  try {
+    const data = await api(`/api/search?q=${encodeURIComponent(query)}`);
+    if (state.filter !== query) return;
+    state.searchResults = data.results || [];
+    renderDocsList();
+  } catch (_) {
+    // The instant name filter already rendered; a failed deep search is non-fatal.
+  }
+}
+
 function renderDocsList() {
   els.docsList.innerHTML = "";
   const filter = state.filter;
+  // Workspace-wide results when available, instant local name filter meanwhile.
   let items = state.items;
   if (filter) {
-    items = items.filter((item) => item.name.toLowerCase().includes(filter) || item.path.toLowerCase().includes(filter));
+    items = state.searchResults
+      || state.items.filter((item) => item.name.toLowerCase().includes(filter) || item.path.toLowerCase().includes(filter));
   }
   if (state.directory && !filter) {
     const upPath = state.directory.split("/").slice(0, -1).join("/");
@@ -735,7 +755,9 @@ function renderDocsList() {
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "empty-docs";
-    empty.textContent = filter ? "No matching documents." : "No documents in this folder.";
+    empty.textContent = filter
+      ? (state.searchResults ? "No matches anywhere in the workspace." : "Searching the workspace…")
+      : "No documents in this folder.";
     els.docsList.append(empty);
     return;
   }
@@ -748,16 +770,18 @@ function docsRow(item, isParent) {
   row.setAttribute("role", "button");
   row.tabIndex = 0;
   const isDirectory = item.kind === "directory";
+  const isSearchHit = item.snippet !== undefined;
   const icon = isDirectory ? "DIR" : item.markdown ? "MD" : "TXT";
   const type = isParent ? "Parent folder" : isDirectory ? "Folder" : item.markdown ? "Markdown" : item.extension || "Text";
-  const modified = isParent ? "" : formatDate(item.modified);
+  const middle = isSearchHit ? dirname(item.path) || "Root" : type;
+  const last = isSearchHit ? item.snippet : isParent ? "" : formatDate(item.modified);
   row.innerHTML = `
     <span class="docs-row-main">
       <span class="docs-row-icon${isDirectory ? " folder" : ""}">${icon}</span>
       <span class="docs-row-name">${escapeHTML(item.name)}</span>
     </span>
-    <span class="docs-row-meta">${escapeHTML(type)}</span>
-    <span class="docs-row-meta">${escapeHTML(modified)}</span>
+    <span class="docs-row-meta">${escapeHTML(middle)}</span>
+    <span class="docs-row-meta">${escapeHTML(last)}</span>
   `;
   const open = async () => {
     try {

@@ -140,6 +140,7 @@ func main() {
 	mux.HandleFunc("/api/file/history/label", a.withAPI(a.handleFileHistoryLabel))
 	mux.HandleFunc("/api/file/restore", a.withAPI(a.handleFileRestore))
 	mux.HandleFunc("/api/file/rename", a.withAPI(a.handleFileRename))
+	mux.HandleFunc("/api/search", a.withAPI(a.handleSearch))
 	mux.HandleFunc("/api/upload", a.withAPI(a.handleUpload))
 	mux.HandleFunc("/api/raw", a.withAuth(a.handleRaw))
 
@@ -881,6 +882,102 @@ func (a *app) handleFileRename(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"path": slashPath(targetRel)})
+}
+
+const maxSearchResults = 50
+const maxSearchFileBytes = 2 * 1024 * 1024
+
+type searchResult struct {
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Kind      string `json:"kind"`
+	Markdown  bool   `json:"markdown"`
+	Extension string `json:"extension"`
+	Modified  string `json:"modified"`
+	Snippet   string `json:"snippet,omitempty"`
+}
+
+// handleSearch matches the query against file names and the content of
+// text files across the whole workspace.
+func (a *app) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	results := []searchResult{}
+	if query == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"results": results})
+		return
+	}
+	_ = filepath.WalkDir(a.root, func(full string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, relErr := filepath.Rel(a.root, full)
+		if relErr != nil || rel == "." {
+			return nil
+		}
+		path := slashPath(rel)
+		if entry.IsDir() {
+			if entry.Name() == historyDirName || strings.HasPrefix(entry.Name(), ".") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		name := entry.Name()
+		nameMatch := strings.Contains(strings.ToLower(name), query)
+		snippet := ""
+		if isLikelyText(name) {
+			if info, err := entry.Info(); err == nil && info.Size() <= maxSearchFileBytes {
+				if data, err := os.ReadFile(full); err == nil && utf8.Valid(data) {
+					snippet = searchSnippet(string(data), query)
+				}
+			}
+		}
+		if !nameMatch && snippet == "" {
+			return nil
+		}
+		info, err := entry.Info()
+		modified := ""
+		if err == nil {
+			modified = info.ModTime().Format(time.RFC3339)
+		}
+		results = append(results, searchResult{
+			Name:      name,
+			Path:      path,
+			Kind:      "file",
+			Markdown:  isMarkdown(name),
+			Extension: strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), "."),
+			Modified:  modified,
+			Snippet:   snippet,
+		})
+		if len(results) >= maxSearchResults {
+			return fs.SkipAll
+		}
+		return nil
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+// searchSnippet returns the trimmed line around the first match, or "".
+func searchSnippet(content string, query string) string {
+	index := strings.Index(strings.ToLower(content), query)
+	if index < 0 {
+		return ""
+	}
+	start := strings.LastIndexByte(content[:index], '\n') + 1
+	end := strings.IndexByte(content[index:], '\n')
+	if end < 0 {
+		end = len(content)
+	} else {
+		end += index
+	}
+	line := strings.TrimSpace(content[start:end])
+	if runes := []rune(line); len(runes) > 140 {
+		line = string(runes[:140]) + "…"
+	}
+	return line
 }
 
 const maxUploadBytes = 10 * 1024 * 1024
