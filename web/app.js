@@ -990,7 +990,7 @@ function applyRemoteMarkdown(markdown) {
     const block = localBlocks[index];
     if (!block) {
       const next = els.editor.querySelectorAll(".block")[index] || null;
-      els.editor.insertBefore(createBlock(remoteBlock.type, remoteBlock.html, remoteBlock.checked), next);
+      els.editor.insertBefore(createBlock(remoteBlock.type, remoteBlock.html, remoteBlock.checked, remoteBlock), next);
       changed = true;
       return;
     }
@@ -1033,6 +1033,12 @@ function applyRemoteBlock(block, remoteBlock) {
   }
   if (block.classList.contains("checked") !== checked) {
     block.classList.toggle("checked", checked);
+    changed = true;
+  }
+  const meta = { gap: remoteBlock.gap ?? 1, marker: remoteBlock.marker, num: remoteBlock.num, lang: remoteBlock.lang };
+  if (block.dataset.gap !== String(meta.gap) || block.dataset.marker !== meta.marker
+    || block.dataset.num !== meta.num || block.dataset.lang !== meta.lang) {
+    applyBlockMeta(block, meta);
     changed = true;
   }
   return changed;
@@ -1302,9 +1308,9 @@ function renderMarkdownDocument(markdown) {
   els.editor.innerHTML = "";
   const blocks = parseMarkdownBlocks(markdown || "");
   if (!blocks.length) {
-    insertBlock("p", "", null);
+    insertBlock("p", "", null, false, { gap: 0 });
   } else {
-    blocks.forEach((block) => insertBlock(block.type, block.html, null, block.checked));
+    blocks.forEach((block) => insertBlock(block.type, block.html, null, block.checked, block));
   }
   state.applying = false;
   const first = els.editor.querySelector(".block");
@@ -1314,67 +1320,98 @@ function renderMarkdownDocument(markdown) {
   }
 }
 
+// Parses Markdown into editor blocks without losing information: anything
+// the editor cannot represent (tables, nested lists, HTML, indented code,
+// front matter, ...) becomes a verbatim "raw" block, blank-line gaps between
+// blocks are recorded, and list markers and fence languages are kept, so a
+// parse/serialize round trip reproduces the file.
 function parseMarkdownBlocks(markdown) {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
   const blocks = [];
   let inCode = false;
   let code = [];
+  let codeLang = "";
+  let gap = 0;
+  let raw = null;
 
-  for (const rawLine of lines) {
-    const line = rawLine;
-    const trimmed = line.trim();
-    if (trimmed.startsWith("```")) {
-      if (inCode) {
-        blocks.push({ type: "code", html: escapeHTML(code.join("\n")) });
+  const push = (block) => {
+    block.gap = gap;
+    gap = 0;
+    blocks.push(block);
+  };
+
+  for (const line of lines) {
+    if (inCode) {
+      if (line.trim().startsWith("```") && line.trimStart() === line) {
+        push({ type: "code", html: escapeHTML(code.join("\n")), lang: codeLang });
         code = [];
         inCode = false;
       } else {
-        inCode = true;
+        code.push(line);
       }
       continue;
     }
-    if (inCode) {
-      code.push(line);
+    if (!line.trim()) {
+      if (raw) {
+        push({ type: "raw", html: escapeHTML(raw.join("\n")) });
+        raw = null;
+      }
+      gap++;
       continue;
     }
-    if (!trimmed) {
+    const fence = line.match(/^```(.*)$/);
+    if (fence && !raw) {
+      inCode = true;
+      codeLang = fence[1].trim();
       continue;
     }
-    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
-    if (heading) {
-      blocks.push({ type: `h${heading[1].length}`, html: inlineMarkdown(heading[2]) });
-      continue;
+    let block = null;
+    if (!raw) {
+      let m;
+      if ((m = line.match(/^(#{1,6}) (.+)$/))) {
+        block = { type: `h${m[1].length}`, html: inlineMarkdown(m[2]) };
+      } else if ((m = line.match(/^([-*]) \[([ xX])\] (.+)$/))) {
+        block = { type: "task", html: inlineMarkdown(m[3]), checked: m[2].toLowerCase() === "x", marker: m[1] };
+      } else if ((m = line.match(/^([-*]) (.+)$/))) {
+        block = { type: "bullet", html: inlineMarkdown(m[2]), marker: m[1] };
+      } else if ((m = line.match(/^(\d+)\. (.+)$/))) {
+        block = { type: "numbered", html: inlineMarkdown(m[2]), num: m[1] };
+      } else if ((m = line.match(/^> ?(.*)$/))) {
+        block = { type: "quote", html: inlineMarkdown(m[1]) };
+      } else if (isPlainParagraphLine(line)) {
+        block = { type: "p", html: inlineMarkdown(line) };
+      }
     }
-    const task = trimmed.match(/^[-*]\s+\[([ xX])\]\s+(.+)$/);
-    if (task) {
-      blocks.push({ type: "task", html: inlineMarkdown(task[2]), checked: task[1].toLowerCase() === "x" });
-      continue;
+    if (block) {
+      push(block);
+    } else if (raw) {
+      raw.push(line);
+    } else {
+      raw = [line];
     }
-    const bullet = trimmed.match(/^[-*]\s+(.+)$/);
-    if (bullet) {
-      blocks.push({ type: "bullet", html: inlineMarkdown(bullet[1]) });
-      continue;
-    }
-    const numbered = trimmed.match(/^\d+\.\s+(.+)$/);
-    if (numbered) {
-      blocks.push({ type: "numbered", html: inlineMarkdown(numbered[1]) });
-      continue;
-    }
-    const quote = trimmed.match(/^>\s?(.*)$/);
-    if (quote) {
-      blocks.push({ type: "quote", html: inlineMarkdown(quote[1]) });
-      continue;
-    }
-    blocks.push({ type: "p", html: inlineMarkdown(trimmed) });
+  }
+  if (raw) {
+    push({ type: "raw", html: escapeHTML(raw.join("\n")) });
   }
   if (inCode) {
-    blocks.push({ type: "code", html: escapeHTML(code.join("\n")) });
+    push({ type: "code", html: escapeHTML(code.join("\n")), lang: codeLang });
   }
   return blocks;
 }
 
-function insertBlock(type, html = "", after = null, checked = false) {
-  const block = createBlock(type, html, checked);
+// A line the paragraph block can reproduce exactly: starts at column 0 and
+// is not some other Markdown construct the editor does not model.
+function isPlainParagraphLine(line) {
+  if (/^\s/.test(line)) return false;
+  if (/^([-*_])\s*\1\s*\1[\s\-*_]*$/.test(line)) return false; // thematic break
+  if (/^(=+|-+)\s*$/.test(line)) return false; // setext underline
+  if (/^[<|]/.test(line)) return false; // HTML or table
+  if (/^\[[^\]]*\]:/.test(line)) return false; // link reference definition
+  return true;
+}
+
+function insertBlock(type, html = "", after = null, checked = false, meta = {}) {
+  const block = createBlock(type, html, checked, meta);
   if (after) {
     after.insertAdjacentElement("afterend", block);
   } else {
@@ -1383,19 +1420,41 @@ function insertBlock(type, html = "", after = null, checked = false) {
   return block;
 }
 
-function createBlock(type, html = "", checked = false) {
+function createBlock(type, html = "", checked = false, meta = {}) {
   const block = document.createElement("div");
   block.className = `block block-${type}`;
   block.dataset.type = type;
   block.dataset.placeholder = placeholderForType(type);
   block.contentEditable = isReadOnly() ? "false" : "true";
-  block.spellcheck = type !== "code";
+  block.spellcheck = type !== "code" && type !== "raw";
   if (checked) {
     block.classList.add("checked");
   }
+  applyBlockMeta(block, meta);
   block.innerHTML = html || "";
   bindBlock(block);
   return block;
+}
+
+// gap: blank lines before the block; marker/num/lang reproduce the exact
+// Markdown the block came from.
+function applyBlockMeta(block, meta = {}) {
+  block.dataset.gap = String(meta.gap ?? 1);
+  if (meta.marker) {
+    block.dataset.marker = meta.marker;
+  } else {
+    delete block.dataset.marker;
+  }
+  if (meta.num) {
+    block.dataset.num = meta.num;
+  } else {
+    delete block.dataset.num;
+  }
+  if (meta.lang) {
+    block.dataset.lang = meta.lang;
+  } else {
+    delete block.dataset.lang;
+  }
 }
 
 function bindBlock(block) {
@@ -1418,7 +1477,15 @@ function handleBlockKeydown(event, block) {
     }
     const transformed = transformCompleteBlockSyntax(block);
     const nextType = nextBlockType(block.dataset.type);
-    const next = insertBlock(nextType, "", transformed || block);
+    const continuingList = ["bullet", "numbered", "task"].includes(nextType);
+    const meta = { gap: continuingList ? 0 : 1 };
+    if (continuingList) {
+      meta.marker = block.dataset.marker;
+      if (nextType === "numbered") {
+        meta.num = String((parseInt(block.dataset.num || "1", 10) || 1) + 1);
+      }
+    }
+    const next = insertBlock(nextType, "", transformed || block, false, meta);
     next.focus();
     setCaretToEnd(next);
     markChanged();
@@ -1504,7 +1571,7 @@ function transformCompleteBlockSyntax(block) {
 }
 
 function transformInlineTextNodes(block) {
-  if (block.dataset.type === "code") return;
+  if (block.dataset.type === "code" || block.dataset.type === "raw") return;
   const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       const parent = node.parentElement;
@@ -1591,8 +1658,11 @@ function setActiveBlockType(type) {
 function setBlockType(block, type) {
   block.dataset.type = type;
   block.dataset.placeholder = placeholderForType(type);
-  block.spellcheck = type !== "code";
+  block.spellcheck = type !== "code" && type !== "raw";
   block.className = `block block-${type}`;
+  if (type === "numbered" && !block.dataset.num) {
+    block.dataset.num = "1";
+  }
 }
 
 function applyInlineCommand(command) {
@@ -1991,13 +2061,24 @@ async function restoreSelectedVersion() {
 
 function serializeDocument() {
   const blocks = [...els.editor.querySelectorAll(".block")];
-  const lines = blocks.map((block) => serializeBlock(block));
-  return lines.join("\n\n").replace(/[ \t]+\n/g, "\n").trimEnd() + "\n";
+  let out = "";
+  blocks.forEach((block, index) => {
+    const gap = Math.max(0, parseInt(block.dataset.gap ?? "1", 10) || 0);
+    if (index > 0) {
+      out += "\n".repeat(gap + 1);
+    } else {
+      out += "\n".repeat(gap);
+    }
+    out += serializeBlock(block);
+  });
+  return out.trimEnd() + "\n";
 }
 
 function serializeBlock(block) {
   const type = block.dataset.type || "p";
-  const text = type === "code" ? block.textContent.replace(/\u00a0/g, " ") : inlineHTMLToMarkdown(block).trim();
+  const verbatim = type === "code" || type === "raw";
+  const text = verbatim ? block.textContent.replace(/\u00a0/g, " ") : inlineHTMLToMarkdown(block).trim();
+  const marker = block.dataset.marker || "-";
   switch (type) {
     case "h1":
       return `# ${text}`.trimEnd();
@@ -2014,13 +2095,15 @@ function serializeBlock(block) {
     case "quote":
       return `> ${text}`.trimEnd();
     case "bullet":
-      return `- ${text}`.trimEnd();
+      return `${marker} ${text}`.trimEnd();
     case "numbered":
-      return `1. ${text}`.trimEnd();
+      return `${block.dataset.num || "1"}. ${text}`.trimEnd();
     case "task":
-      return `- [${block.classList.contains("checked") ? "x" : " "}] ${text}`.trimEnd();
+      return `${marker} [${block.classList.contains("checked") ? "x" : " "}] ${text}`.trimEnd();
     case "code":
-      return `\`\`\`\n${text}\n\`\`\``;
+      return `\`\`\`${block.dataset.lang || ""}\n${text}\n\`\`\``;
+    case "raw":
+      return text;
     default:
       return text;
   }
@@ -2074,6 +2157,7 @@ function placeholderForType(type) {
   if (type === "numbered") return "Numbered item";
   if (type === "task") return "Task";
   if (type === "code") return "Code";
+  if (type === "raw") return "Raw Markdown (kept verbatim)";
   return "Type / or Markdown";
 }
 
