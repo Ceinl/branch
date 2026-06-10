@@ -1445,3 +1445,7 @@ button {
 .image-remove:hover {
   background: var(--red);
 }
+
+.trash-row .docs-row-actions {
+  display: flex;
+}

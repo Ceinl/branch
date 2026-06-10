@@ -23,3 +23,24 @@ jobs:
         run: go build ./...
       - name: js syntax
         run: node --check web/app.js
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: build branch
+        run: go build -o branch .
+      - name: install playwright
+        working-directory: e2e
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+      - name: run e2e suite
+        working-directory: e2e
+        run: node run.mjs
