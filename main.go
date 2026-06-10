@@ -853,13 +853,13 @@ func (a *app) handleFileRename(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if info.IsDir() {
-		writeError(w, http.StatusBadRequest, "renaming folders is not supported yet")
-		return
-	}
 	target, targetRel, err := a.resolveWritable(req.To)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if info.IsDir() && (targetRel == cleanRel || strings.HasPrefix(slashPath(targetRel), slashPath(cleanRel)+"/")) {
+		writeError(w, http.StatusBadRequest, "cannot move a folder into itself")
 		return
 	}
 	if _, err := os.Lstat(target); err == nil {
@@ -871,7 +871,12 @@ func (a *app) handleFileRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.history.enabled {
-		if err := a.history.rename(slashPath(cleanRel), slashPath(targetRel)); err != nil {
+		if info.IsDir() {
+			err = a.history.renameFolder(slashPath(cleanRel), slashPath(targetRel))
+		} else {
+			err = a.history.rename(slashPath(cleanRel), slashPath(targetRel))
+		}
+		if err != nil {
 			log.Printf("history: rename %s to %s: %v", slashPath(cleanRel), slashPath(targetRel), err)
 		}
 	}

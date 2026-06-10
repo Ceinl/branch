@@ -785,14 +785,12 @@ function docsRow(item, isParent) {
   if (!isParent && !isReadOnly()) {
     const actions = document.createElement("span");
     actions.className = "docs-row-actions";
-    if (!isDirectory) {
-      const rename = document.createElement("button");
-      rename.type = "button";
-      rename.className = "docs-row-action";
-      rename.textContent = "Rename";
-      rename.addEventListener("click", () => renameItem(item).catch((error) => showError(error.message)));
-      actions.append(rename);
-    }
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.className = "docs-row-action";
+    rename.textContent = "Rename";
+    rename.addEventListener("click", () => renameItem(item).catch((error) => showError(error.message)));
+    actions.append(rename);
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "docs-row-action danger";
@@ -808,9 +806,9 @@ async function renameCurrentFile() {
   closeFileMenu();
   if (!state.file) return;
   await maybeSaveBeforeNavigation();
-  const name = prompt("Rename to", basename(state.file.path));
+  const name = prompt("Rename to (use / to move to another folder)", basename(state.file.path));
   if (!name || name.trim() === basename(state.file.path)) return;
-  const to = joinPath(dirname(state.file.path), name.trim());
+  const to = renameTarget(state.file.path, name);
   const result = await api("/api/file/rename", {
     method: "POST",
     body: JSON.stringify({ path: state.file.path, to }),
@@ -833,15 +831,25 @@ async function deleteCurrentFile() {
 }
 
 async function renameItem(item) {
-  const name = prompt("Rename to", item.name);
+  const name = prompt("Rename to (use / to move to another folder)", item.name);
   if (!name || name.trim() === item.name) return;
-  const to = joinPath(dirname(item.path), name.trim());
+  const to = renameTarget(item.path, name);
   const result = await api("/api/file/rename", {
     method: "POST",
     body: JSON.stringify({ path: item.path, to }),
   });
   await loadDirectory(state.directory);
   showToast(`Renamed to ${result.path}`);
+}
+
+// A plain name renames in place; a name containing "/" is a root-relative
+// destination, which moves the item.
+function renameTarget(fromPath, input) {
+  const cleaned = input.trim().replace(/^\/+/, "");
+  if (cleaned.includes("/")) {
+    return cleaned;
+  }
+  return joinPath(dirname(fromPath), cleaned);
 }
 
 async function deleteItem(item) {

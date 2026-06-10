@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -30,6 +31,7 @@ const coalesceWindow = 120 * time.Second
 type historyStore struct {
 	mu      sync.Mutex
 	gitDir  string
+	mapPath string
 	enabled bool
 	ready   bool
 	gcOnce  sync.Once
@@ -55,8 +57,39 @@ func newHistoryStore(root string, enabled bool) *historyStore {
 	}
 	return &historyStore{
 		gitDir:  filepath.Join(root, historyDirName, "history.git"),
+		mapPath: filepath.Join(root, historyDirName, "paths.json"),
 		enabled: enabled,
 	}
+}
+
+// Refs are keyed by a hash of the file path, which cannot be reversed, so a
+// sidecar index of key -> path is kept for prefix operations like folder
+// renames.
+func (s *historyStore) loadPathsLocked() map[string]string {
+	paths := map[string]string{}
+	data, err := os.ReadFile(s.mapPath)
+	if err != nil {
+		return paths
+	}
+	_ = json.Unmarshal(data, &paths)
+	return paths
+}
+
+func (s *historyStore) savePathsLocked(paths map[string]string) {
+	data, err := json.Marshal(paths)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(s.mapPath, data, 0644)
+}
+
+func (s *historyStore) recordPathLocked(key string, path string) {
+	paths := s.loadPathsLocked()
+	if paths[key] == path {
+		return
+	}
+	paths[key] = path
+	s.savePathsLocked(paths)
 }
 
 func (s *historyStore) ensureRepoLocked() error {
@@ -183,6 +216,7 @@ func (s *historyStore) recordSave(path string, content string, user authUser, cl
 	if _, err := s.git(nil, nil, "update-ref", "refs/cur/"+key, commit); err != nil {
 		return "", err
 	}
+	s.recordPathLocked(key, path)
 	return commit, nil
 }
 
@@ -325,6 +359,45 @@ func (s *historyStore) rename(oldPath string, newPath string) error {
 	if err := s.ensureRepoLocked(); err != nil {
 		return err
 	}
+	if err := s.renameRefsLocked(oldPath, newPath); err != nil {
+		return err
+	}
+	paths := s.loadPathsLocked()
+	delete(paths, historyKey(oldPath))
+	paths[historyKey(newPath)] = newPath
+	s.savePathsLocked(paths)
+	return nil
+}
+
+// renameFolder re-keys the version trees of every file recorded under the
+// old folder prefix.
+func (s *historyStore) renameFolder(oldPrefix string, newPrefix string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureRepoLocked(); err != nil {
+		return err
+	}
+	paths := s.loadPathsLocked()
+	changed := false
+	for key, path := range paths {
+		if path != oldPrefix && !strings.HasPrefix(path, oldPrefix+"/") {
+			continue
+		}
+		newPath := newPrefix + path[len(oldPrefix):]
+		if err := s.renameRefsLocked(path, newPath); err != nil {
+			return err
+		}
+		delete(paths, key)
+		paths[historyKey(newPath)] = newPath
+		changed = true
+	}
+	if changed {
+		s.savePathsLocked(paths)
+	}
+	return nil
+}
+
+func (s *historyStore) renameRefsLocked(oldPath string, newPath string) error {
 	oldKey := historyKey(oldPath)
 	newKey := historyKey(newPath)
 	out, err := s.git(nil, nil, "for-each-ref", "--format=%(refname) %(objectname)", "refs/tips/"+oldKey, "refs/cur/"+oldKey)
