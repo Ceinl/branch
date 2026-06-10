@@ -2,6 +2,17 @@
 
 Branch is a self-hosted Markdown document editor written in Go. It serves a local folder in the browser and gives you a Google Docs-style editor with live Markdown rendering and lightweight collaboration
 
+![Editor with the version history tree](docs/editor-history.png)
+
+<details>
+<summary>More screenshots</summary>
+
+![Documents list](docs/docs-list.png)
+
+![Editor in dark mode](docs/editor-dark.png)
+
+</details>
+
 ## Install
 
 Download a binary for your platform from the GitHub releases page, or build from source (requires Go):
