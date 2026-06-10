@@ -166,6 +166,7 @@ func main() {
 	if cfg.open {
 		openBrowser(openURL)
 	}
+	go a.watchExternalChanges()
 	server := &http.Server{Handler: mux}
 	go func() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

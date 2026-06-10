@@ -213,6 +213,16 @@ func (h *collabHub) eventsSince(path string, since uint64) (uint64, []collabEven
 	return room.version, events
 }
 
+func (h *collabHub) activePaths() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	paths := make([]string, 0, len(h.rooms))
+	for path := range h.rooms {
+		paths = append(paths, path)
+	}
+	return paths
+}
+
 func (h *collabHub) roomLocked(path string) *collabRoom {
 	room := h.rooms[path]
 	if room == nil {
