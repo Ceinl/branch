@@ -30,6 +30,7 @@ const state = {
   suppressHashChange: false,
   searchTimer: null,
   searchResults: null,
+  trashView: false,
   historyOpen: false,
   historyNodes: [],
   historySelected: null,
@@ -51,6 +52,7 @@ const els = {
   docsList: document.getElementById("docs-list"),
   homeNewDoc: document.getElementById("home-new-doc"),
   homeNewFolder: document.getElementById("home-new-folder"),
+  docsTrash: document.getElementById("docs-trash"),
   signoutButton: document.getElementById("signout-button"),
   backToDocs: document.getElementById("back-to-docs"),
   fileMenuToggle: document.getElementById("file-menu-toggle"),
@@ -246,6 +248,7 @@ function bindEvents() {
   els.signoutButton.addEventListener("click", () => signOut());
   els.homeNewDoc.addEventListener("click", () => createFile());
   els.homeNewFolder.addEventListener("click", () => createFolder());
+  els.docsTrash.addEventListener("click", () => toggleTrashView().catch((error) => showError(error.message)));
   els.fileNewDoc.addEventListener("click", () => createFile());
   els.fileNewFolder.addEventListener("click", () => createFolder());
   els.fileOpenDocs.addEventListener("click", () => goToDocs());
@@ -329,6 +332,12 @@ function bindEvents() {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") {
       event.preventDefault();
       createFile();
+    }
+    if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "k") {
+      if (state.view === "editor" && !isReadOnly()) {
+        event.preventDefault();
+        applyInlineCommand("link");
+      }
     }
     if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "h") {
       event.preventDefault();
@@ -694,6 +703,8 @@ async function goToDocs() {
 
 async function loadDirectory(path) {
   const data = await api(`/api/files?path=${encodeURIComponent(path)}`);
+  state.trashView = false;
+  els.docsTrash.classList.remove("active");
   state.directory = data.path || "";
   state.items = data.items || [];
   renderDocsBreadcrumbs();
@@ -726,6 +737,65 @@ function crumbButton(label, path) {
     }
   });
   return button;
+}
+
+async function toggleTrashView() {
+  state.trashView = !state.trashView;
+  els.docsTrash.classList.toggle("active", state.trashView);
+  if (!state.trashView) {
+    renderDocsList();
+    return;
+  }
+  const data = await api("/api/trash");
+  if (!state.trashView) return;
+  renderTrashList(data.items || []);
+}
+
+function renderTrashList(items) {
+  els.docsList.innerHTML = "";
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-docs";
+    empty.textContent = "No deleted files with saved history.";
+    els.docsList.append(empty);
+    return;
+  }
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "docs-row";
+    row.innerHTML = `
+      <span class="docs-row-main">
+        <span class="docs-row-icon">DEL</span>
+        <span class="docs-row-name">${escapeHTML(basename(item.path))}</span>
+      </span>
+      <span class="docs-row-meta">${escapeHTML(dirname(item.path) || "Root")}</span>
+      <span class="docs-row-meta">${escapeHTML(formatRelative(item.time))}</span>
+    `;
+    if (!isReadOnly()) {
+      const actions = document.createElement("span");
+      actions.className = "docs-row-actions";
+      const restore = document.createElement("button");
+      restore.type = "button";
+      restore.className = "docs-row-action";
+      restore.textContent = "Restore";
+      restore.addEventListener("click", async () => {
+        try {
+          await api("/api/file/restore", {
+            method: "POST",
+            body: JSON.stringify({ path: item.path, id: item.id, clientId: state.clientId }),
+          });
+          showToast(`Restored ${item.path}`);
+          await loadDirectory(state.directory);
+        } catch (error) {
+          showError(error.message);
+        }
+      });
+      actions.append(restore);
+      row.append(actions);
+      row.classList.add("trash-row");
+    }
+    els.docsList.append(row);
+  });
 }
 
 async function runWorkspaceSearch(query) {
@@ -1651,6 +1721,10 @@ function handleBlockKeydown(event, block) {
     return;
   }
 
+  if (handleArrowNavigation(event, block)) {
+    return;
+  }
+
   if (event.key === "Backspace" && isBlockEmpty(block)) {
     if (block.dataset.type !== "p") {
       event.preventDefault();
@@ -1667,6 +1741,63 @@ function handleBlockKeydown(event, block) {
       markChanged();
     }
   }
+}
+
+// Each block is its own contenteditable, so the browser never moves the
+// caret across block boundaries; do it ourselves.
+function handleArrowNavigation(event, block) {
+  if (event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return false;
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) return false;
+  const offset = caretOffsetInBlock(block, selection.focusNode, selection.focusOffset);
+  const length = normalizedText(block).length;
+  if (event.key === "ArrowLeft" && offset === 0) {
+    return focusAdjacentBlock(event, block, -1, "end");
+  }
+  if (event.key === "ArrowRight" && offset >= length) {
+    return focusAdjacentBlock(event, block, 1, "start");
+  }
+  if (event.key === "ArrowUp" && caretOnEdgeLine(block, "first")) {
+    return focusAdjacentBlock(event, block, -1, "end");
+  }
+  if (event.key === "ArrowDown" && caretOnEdgeLine(block, "last")) {
+    return focusAdjacentBlock(event, block, 1, "start");
+  }
+  return false;
+}
+
+function caretOnEdgeLine(block, edge) {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return false;
+  const rect = firstCursorRect(selection.getRangeAt(0));
+  if (!rect) return true; // empty block: a single line is both edges
+  const blockRect = block.getBoundingClientRect();
+  const lineHeight = parseFloat(getComputedStyle(block).lineHeight) || 20;
+  if (edge === "first") {
+    return rect.top - blockRect.top < lineHeight * 0.9;
+  }
+  return blockRect.bottom - rect.bottom < lineHeight * 0.9;
+}
+
+function focusAdjacentBlock(event, block, direction, caret) {
+  let target = direction > 0 ? block.nextElementSibling : block.previousElementSibling;
+  while (target && target.contentEditable !== "true") {
+    target = direction > 0 ? target.nextElementSibling : target.previousElementSibling;
+  }
+  if (!target) return false;
+  event.preventDefault();
+  target.focus();
+  if (caret === "end") {
+    setCaretToEnd(target);
+  } else {
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  return true;
 }
 
 function nextBlockType(type) {
@@ -1834,8 +1965,51 @@ function applyInlineCommand(command) {
     document.execCommand("italic", false);
   } else if (command === "code") {
     wrapSelectionWith("code");
+  } else if (command === "link") {
+    editLinkAtSelection();
   }
   markChanged();
+}
+
+function editLinkAtSelection() {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return;
+  const focusElement = selection.focusNode?.nodeType === Node.ELEMENT_NODE
+    ? selection.focusNode
+    : selection.focusNode?.parentElement;
+  const existing = focusElement?.closest?.("a");
+  if (existing && els.editor.contains(existing)) {
+    const url = prompt("Link URL (empty to remove the link)", existing.getAttribute("href") || "");
+    if (url === null) return;
+    const safe = sanitizeURL(url.trim());
+    if (!url.trim() || !safe) {
+      existing.replaceWith(...existing.childNodes);
+    } else {
+      existing.href = safe;
+    }
+    return;
+  }
+  if (selection.isCollapsed) {
+    showToast("Select some text to turn into a link.");
+    return;
+  }
+  const url = prompt("Link URL", "https://");
+  if (url === null) return;
+  const safe = sanitizeURL(url.trim());
+  if (!safe) {
+    showError("Only http, https, and mailto links are allowed.");
+    return;
+  }
+  wrapSelectionWith("a");
+  const focus = selection.focusNode?.nodeType === Node.ELEMENT_NODE
+    ? selection.focusNode
+    : selection.focusNode?.parentElement;
+  const link = focus?.closest?.("a");
+  if (link) {
+    link.href = safe;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+  }
 }
 
 function wrapSelectionWith(tag) {

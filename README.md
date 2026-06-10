@@ -110,7 +110,11 @@ If a file changed on the server after you loaded it (for example another collabo
 
 Rapid autosaves from the same client within two minutes coalesce into a single version, so the tree stays readable. Saving identical content creates no new version.
 
+Deleted files can be brought back from the Deleted view in the docs list, restored from their last saved version.
+
 History requires `git` on the server's PATH. Disable it with `--no-history`. The `.branch` folder is hidden from the file list and cannot be opened or edited through the app.
+
+Back up the `.branch` folder along with your documents: it holds the entire version history and (in shared mode) active sessions.
 
 ## Auth
 

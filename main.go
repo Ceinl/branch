@@ -44,6 +44,7 @@ type app struct {
 	history   *historyStore
 	allowed   map[string]bool
 	readOnly  bool
+	logins    *loginLimiter
 }
 
 // denyReadOnly rejects the request when the server is read-only, so every
@@ -116,6 +117,7 @@ func main() {
 		history:   newHistoryStore(root, !cfg.noHistory),
 		allowed:   parseAllowList(cfg.allow),
 		readOnly:  cfg.readOnly,
+		logins:    newLoginLimiter(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleIndex)
@@ -141,6 +143,7 @@ func main() {
 	mux.HandleFunc("/api/file/restore", a.withAPI(a.handleFileRestore))
 	mux.HandleFunc("/api/file/rename", a.withAPI(a.handleFileRename))
 	mux.HandleFunc("/api/search", a.withAPI(a.handleSearch))
+	mux.HandleFunc("/api/trash", a.withAPI(a.handleTrash))
 	mux.HandleFunc("/api/upload", a.withAPI(a.handleUpload))
 	mux.HandleFunc("/api/raw", a.withAuth(a.handleRaw))
 
@@ -744,8 +747,22 @@ func (a *app) handleFileRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	full, cleanRel, err := a.resolveWritable(req.Path)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		// Restoring a deleted file whose folder was also deleted: recreate
+		// the folder (validated lexically against the root) and retry.
+		lexical, _, lexErr := a.resolveLexical(req.Path)
+		if lexErr != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if mkErr := os.MkdirAll(filepath.Dir(lexical), 0755); mkErr != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		full, cleanRel, err = a.resolveWritable(req.Path)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	mode := fs.FileMode(0644)
 	if info, err := os.Stat(full); err == nil {
@@ -979,6 +996,23 @@ func searchSnippet(content string, query string) string {
 		line = string(runes[:140]) + "…"
 	}
 	return line
+}
+
+func (a *app) handleTrash(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !a.history.enabled {
+		writeJSON(w, http.StatusOK, map[string]any{"items": []trashEntry{}})
+		return
+	}
+	items, err := a.history.trash()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 const maxUploadBytes = 10 * 1024 * 1024

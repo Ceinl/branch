@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -128,6 +129,43 @@ func (s *sessionStore) delete(token string) {
 	defer s.mu.Unlock()
 	delete(s.sessions, hashSessionToken(token))
 	s.saveLocked()
+}
+
+// loginLimiter caps sign-in attempts per client IP to slow down brute force
+// against the session endpoint.
+type loginLimiter struct {
+	mu   sync.Mutex
+	hits map[string][]time.Time
+}
+
+func newLoginLimiter() *loginLimiter {
+	return &loginLimiter{hits: map[string][]time.Time{}}
+}
+
+func (l *loginLimiter) allow(key string, limit int, window time.Duration) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	cutoff := time.Now().Add(-window)
+	kept := l.hits[key][:0]
+	for _, hit := range l.hits[key] {
+		if hit.After(cutoff) {
+			kept = append(kept, hit)
+		}
+	}
+	if len(kept) >= limit {
+		l.hits[key] = kept
+		return false
+	}
+	l.hits[key] = append(kept, time.Now())
+	return true
+}
+
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 type shooVerifier struct {
@@ -308,6 +346,10 @@ func (a *app) handleSession(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"user": user})
 	case http.MethodPost:
+		if !a.logins.allow(clientIP(r), 10, time.Minute) {
+			writeError(w, http.StatusTooManyRequests, "too many sign-in attempts, try again in a minute")
+			return
+		}
 		var req struct {
 			IDToken string `json:"idToken"`
 		}

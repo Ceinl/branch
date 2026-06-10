@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,11 +31,18 @@ const coalesceWindow = 120 * time.Second
 
 type historyStore struct {
 	mu      sync.Mutex
+	root    string
 	gitDir  string
 	mapPath string
 	enabled bool
 	ready   bool
 	gcOnce  sync.Once
+}
+
+type trashEntry struct {
+	Path string `json:"path"`
+	ID   string `json:"id"`
+	Time string `json:"time"`
 }
 
 type historyNode struct {
@@ -56,10 +64,35 @@ func newHistoryStore(root string, enabled bool) *historyStore {
 		}
 	}
 	return &historyStore{
+		root:    root,
 		gitDir:  filepath.Join(root, historyDirName, "history.git"),
 		mapPath: filepath.Join(root, historyDirName, "paths.json"),
 		enabled: enabled,
 	}
+}
+
+// trash lists files that have version history but no longer exist on disk;
+// restoring their current commit brings them back.
+func (s *historyStore) trash() ([]trashEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureRepoLocked(); err != nil {
+		return nil, err
+	}
+	entries := []trashEntry{}
+	for key, path := range s.loadPathsLocked() {
+		if _, err := os.Stat(filepath.Join(s.root, filepath.FromSlash(path))); err == nil {
+			continue
+		}
+		cur, err := s.git(nil, nil, "rev-parse", "--verify", "--quiet", "refs/cur/"+key)
+		if err != nil || cur == "" {
+			continue
+		}
+		when, _ := s.git(nil, nil, "log", "-1", "--format=%aI", cur)
+		entries = append(entries, trashEntry{Path: path, ID: cur, Time: when})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Time > entries[j].Time })
+	return entries, nil
 }
 
 // Refs are keyed by a hash of the file path, which cannot be reversed, so a
