@@ -2,19 +2,21 @@
 
 Branch is a self-hosted Markdown document editor written in Go. It serves a local folder in the browser and gives you a Google Docs-style editor with live Markdown rendering and lightweight collaboration
 
+## Install
+
+Download a binary for your platform from the GitHub releases page, or build from source (requires Go):
+
+```
+go build -o branch .
+./branch .
+```
+
 ## Run
 
 Run against the current directory:
 
 ```
 go run . .
-```
-
-Build a `branch` binary:
-
-```
-go build -o branch .
-./branch .
 ```
 
 After install, the command shape is:
@@ -76,7 +78,15 @@ branch share https://your-tunnel.trycloudflare.com .
 
 - Opens UTF-8 text files and highlights Markdown files.
 
-- Creates, renames, and deletes Markdown files and folders. Version history follows renames.
+- Creates, renames, moves, and deletes Markdown files and folders. Version history follows renames and moves, including folder renames.
+
+- Round-trips Markdown losslessly: constructs the editor does not model (tables, nested lists, HTML, front matter, ...) are shown as raw blocks and written back byte-for-byte.
+
+- Pastes and drag-drops images: uploads land in an `assets/` folder next to the document and render inline.
+
+- Full-text search across the whole workspace from the docs search box.
+
+- Deep links: `#/doc/<path>` and `#/dir/<path>` URLs are shareable, and reload restores the open document.
 
 - Autosaves edits with `Cmd+S` / `Ctrl+S` support.
 
@@ -110,7 +120,11 @@ Every signed-in user has full read and write access to the served folder. To res
 branch share --allow alice@example.com,bob@example.com https://docs.example.com .
 ```
 
-Shoo identity is kept in browser storage, and Branch also sets an HttpOnly session cookie. In shared mode you should not need to re-login on page reload. You may need to sign in again after token expiry, browser storage or cookie cleanup, server restart, or if the public origin changes.
+Shoo identity is kept in browser storage, and Branch also sets an HttpOnly session cookie. Sessions persist across server restarts (stored hashed in `.branch/sessions.json`), so in shared mode you should not need to re-login on page reload or after a restart. You may need to sign in again after token expiry or browser storage and cookie cleanup.
+
+## Security
+
+Branch sets a Content-Security-Policy and rejects state-changing requests from other origins. Uploaded images are restricted to image extensions and served with headers that prevent script execution (relevant for SVG). Branch itself serves plain HTTP; for shared use put it behind HTTPS (a reverse proxy or tunnel) and pass the public origin with `branch share`.
 
 ## Collaboration
 
@@ -122,4 +136,8 @@ Remote live edits are applied block by block while protecting the block you are 
 
 ## Notes
 
-This is an MVP, not a full Notion replacement yet. Collaboration is block-level live sync, not a full CRDT engine.
+Collaboration is block-level live sync, not a full CRDT engine: simultaneous edits to different blocks merge live, the block you are typing in is protected, and conflicting saves prompt before overwriting (with both versions kept in history). Two people typing in the same block at the same moment still resolves last-writer-wins.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
