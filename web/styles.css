@@ -1412,3 +1412,36 @@ button {
   line-height: 1.5;
   white-space: pre-wrap;
 }
+
+.block-image {
+  position: relative;
+  margin: 10px 0;
+}
+
+.block-image img {
+  display: block;
+  max-width: 100%;
+  border-radius: 6px;
+}
+
+.image-remove {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: none;
+  width: 26px;
+  height: 26px;
+  color: white;
+  background: rgba(32, 33, 36, 0.7);
+  border-radius: 50%;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.block-image:hover .image-remove {
+  display: block;
+}
+
+.image-remove:hover {
+  background: var(--red);
+}

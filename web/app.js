@@ -284,6 +284,17 @@ function bindEvents() {
   });
   els.editor.addEventListener("keyup", () => scheduleCollabPresence());
   els.editor.addEventListener("mouseup", () => scheduleCollabPresence());
+  els.editor.addEventListener("dragover", (event) => {
+    if (event.dataTransfer?.types?.includes("Files")) {
+      event.preventDefault();
+    }
+  });
+  els.editor.addEventListener("drop", (event) => {
+    const files = [...(event.dataTransfer?.files || [])].filter((file) => file.type.startsWith("image/"));
+    if (!files.length || isReadOnly() || !state.file) return;
+    event.preventDefault();
+    uploadImages(files).catch((error) => showError(error.message));
+  });
 
   document.querySelectorAll("[data-block]").forEach((button) => {
     button.addEventListener("click", () => setActiveBlockType(button.dataset.block));
@@ -1083,7 +1094,15 @@ function applyRemoteBlock(block, remoteBlock) {
     setBlockType(block, type);
     changed = true;
   }
-  if (block.innerHTML !== html) {
+  if (type === "image") {
+    if (block.dataset.src !== remoteBlock.src || block.dataset.alt !== (remoteBlock.alt || "")) {
+      block.dataset.src = remoteBlock.src || "";
+      block.dataset.alt = remoteBlock.alt || "";
+      block.contentEditable = "false";
+      buildImageContent(block);
+      changed = true;
+    }
+  } else if (block.innerHTML !== html) {
     block.innerHTML = html;
     changed = true;
   }
@@ -1091,7 +1110,14 @@ function applyRemoteBlock(block, remoteBlock) {
     block.classList.toggle("checked", checked);
     changed = true;
   }
-  const meta = { gap: remoteBlock.gap ?? 1, marker: remoteBlock.marker, num: remoteBlock.num, lang: remoteBlock.lang };
+  const meta = {
+    gap: remoteBlock.gap ?? 1,
+    marker: remoteBlock.marker,
+    num: remoteBlock.num,
+    lang: remoteBlock.lang,
+    src: remoteBlock.src,
+    alt: remoteBlock.alt,
+  };
   if (block.dataset.gap !== String(meta.gap) || block.dataset.marker !== meta.marker
     || block.dataset.num !== meta.num || block.dataset.lang !== meta.lang) {
     applyBlockMeta(block, meta);
@@ -1434,6 +1460,8 @@ function parseMarkdownBlocks(markdown) {
         block = { type: "numbered", html: inlineMarkdown(m[2]), num: m[1] };
       } else if ((m = line.match(/^> ?(.*)$/))) {
         block = { type: "quote", html: inlineMarkdown(m[1]) };
+      } else if ((m = line.match(/^!\[([^\]]*)\]\(([^()]+)\)$/))) {
+        block = { type: "image", html: "", alt: m[1], src: m[2] };
       } else if (isPlainParagraphLine(line)) {
         block = { type: "p", html: inlineMarkdown(line) };
       }
@@ -1487,9 +1515,45 @@ function createBlock(type, html = "", checked = false, meta = {}) {
     block.classList.add("checked");
   }
   applyBlockMeta(block, meta);
-  block.innerHTML = html || "";
+  if (type === "image") {
+    block.contentEditable = "false";
+    buildImageContent(block);
+  } else {
+    block.innerHTML = html || "";
+  }
   bindBlock(block);
   return block;
+}
+
+function buildImageContent(block) {
+  block.innerHTML = "";
+  const img = document.createElement("img");
+  img.src = resolveImageSrc(block.dataset.src || "");
+  img.alt = block.dataset.alt || "";
+  img.loading = "lazy";
+  block.append(img);
+  if (!isReadOnly()) {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "image-remove";
+    remove.title = "Remove image";
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      state.activeBlock = block.previousElementSibling || block.nextElementSibling;
+      block.remove();
+      markChanged();
+    });
+    block.append(remove);
+  }
+}
+
+function resolveImageSrc(src) {
+  if (/^(https?:|data:)/i.test(src)) {
+    return src;
+  }
+  const dir = state.file ? dirname(state.file.path) : "";
+  const path = joinPath(dir, src.replace(/^\.\//, ""));
+  return `/api/raw?path=${encodeURIComponent(path)}`;
 }
 
 // gap: blank lines before the block; marker/num/lang reproduce the exact
@@ -1510,6 +1574,13 @@ function applyBlockMeta(block, meta = {}) {
     block.dataset.lang = meta.lang;
   } else {
     delete block.dataset.lang;
+  }
+  if (meta.src) {
+    block.dataset.src = meta.src;
+    block.dataset.alt = meta.alt || "";
+  } else {
+    delete block.dataset.src;
+    delete block.dataset.alt;
   }
 }
 
@@ -2160,6 +2231,8 @@ function serializeBlock(block) {
       return `\`\`\`${block.dataset.lang || ""}\n${text}\n\`\`\``;
     case "raw":
       return text;
+    case "image":
+      return `![${block.dataset.alt || ""}](${block.dataset.src || ""})`;
     default:
       return text;
   }
@@ -2218,9 +2291,35 @@ function placeholderForType(type) {
 }
 
 function pastePlainText(event) {
+  const files = [...(event.clipboardData?.files || [])].filter((file) => file.type.startsWith("image/"));
+  if (files.length && !isReadOnly() && state.file) {
+    event.preventDefault();
+    uploadImages(files).catch((error) => showError(error.message));
+    return;
+  }
   event.preventDefault();
   const text = event.clipboardData?.getData("text/plain") || "";
   document.execCommand("insertText", false, text);
+}
+
+async function uploadImages(files) {
+  for (const file of files) {
+    const form = new FormData();
+    form.append("dir", dirname(state.file.path));
+    form.append("file", file, file.name || "pasted.png");
+    const response = await fetch("/api/upload", { method: "POST", credentials: "same-origin", body: form });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || "Image upload failed");
+    }
+    const after = state.activeBlock && els.editor.contains(state.activeBlock)
+      ? state.activeBlock
+      : [...els.editor.querySelectorAll(".block")].pop() || null;
+    const block = insertBlock("image", "", after, false, { gap: 1, src: data.src, alt: file.name || "image" });
+    state.activeBlock = block;
+    markChanged();
+  }
+  showToast(files.length === 1 ? "Image added" : `${files.length} images added`);
 }
 
 function isBlockEmpty(block) {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"mime"
@@ -139,6 +140,8 @@ func main() {
 	mux.HandleFunc("/api/file/history/label", a.withAPI(a.handleFileHistoryLabel))
 	mux.HandleFunc("/api/file/restore", a.withAPI(a.handleFileRestore))
 	mux.HandleFunc("/api/file/rename", a.withAPI(a.handleFileRename))
+	mux.HandleFunc("/api/upload", a.withAPI(a.handleUpload))
+	mux.HandleFunc("/api/raw", a.withAuth(a.handleRaw))
 
 	listener, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
@@ -873,6 +876,135 @@ func (a *app) handleFileRename(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"path": slashPath(targetRel)})
+}
+
+const maxUploadBytes = 10 * 1024 * 1024
+
+var imageExtensions = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
+	".webp": true, ".svg": true, ".avif": true, ".bmp": true, ".ico": true,
+}
+
+func (a *app) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if a.denyReadOnly(w) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes+1024*1024)
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid upload: "+err.Error())
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "missing file field")
+		return
+	}
+	defer file.Close()
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if !imageExtensions[ext] {
+		writeError(w, http.StatusUnsupportedMediaType, "only image uploads are supported")
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxUploadBytes+1))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(data) > maxUploadBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "image is larger than 10 MB")
+		return
+	}
+
+	dirFull, dirRel, err := a.resolveExisting(r.FormValue("dir"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if info, err := os.Stat(dirFull); err != nil || !info.IsDir() {
+		writeError(w, http.StatusBadRequest, "dir is not a directory")
+		return
+	}
+	suffix, err := randomToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	name := sanitizeUploadName(strings.TrimSuffix(filepath.Base(header.Filename), ext)) + "-" + suffix[:8] + ext
+	if err := os.MkdirAll(filepath.Join(dirFull, "assets"), 0755); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	full, cleanRel, err := a.resolveWritable(joinRel(dirRel, filepath.Join("assets", name)))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := atomicWrite(full, data, 0644); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"path": slashPath(cleanRel),
+		"src":  "assets/" + name,
+	})
+}
+
+func sanitizeUploadName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		case r == ' ' || r == '.':
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		out = "image"
+	}
+	if len(out) > 60 {
+		out = out[:60]
+	}
+	return out
+}
+
+// handleRaw serves image bytes so documents can embed uploaded files. Only
+// image extensions are served, with headers that neutralize scriptable
+// formats like SVG.
+func (a *app) handleRaw(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	full, cleanRel, err := a.resolveExisting(r.URL.Query().Get("path"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !imageExtensions[strings.ToLower(filepath.Ext(cleanRel))] {
+		http.Error(w, "only image files are served raw", http.StatusUnsupportedMediaType)
+		return
+	}
+	file, err := os.Open(full)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.IsDir() {
+		http.Error(w, "not a file", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	http.ServeContent(w, r, filepath.Base(full), info.ModTime(), file)
 }
 
 func (a *app) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
