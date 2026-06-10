@@ -27,6 +27,7 @@ const state = {
   streamReady: false,
   remoteCleanupTimer: null,
   config: null,
+  suppressHashChange: false,
   historyOpen: false,
   historyNodes: [],
   historySelected: null,
@@ -119,8 +120,61 @@ async function init() {
   state.root = root;
   els.docsRootPath.textContent = root.path;
   els.rootPath.textContent = root.path;
-  await loadDirectory("");
-  showDocsView();
+  try {
+    await routeFromHash();
+  } catch (_) {
+    await loadDirectory("");
+    showDocsView();
+  }
+  window.addEventListener("hashchange", () => {
+    if (state.suppressHashChange) {
+      state.suppressHashChange = false;
+      return;
+    }
+    routeFromHash().catch((error) => showError(error.message));
+  });
+}
+
+// Deep links: #/doc/<path> opens a file, #/dir/<path> a folder. Segments are
+// URI-encoded so any filename round-trips through the URL.
+function parseHash() {
+  const hash = location.hash || "";
+  const match = hash.match(/^#\/(doc|dir)\/(.*)$/);
+  if (!match) return { kind: "dir", path: "" };
+  const path = match[2].split("/").map((part) => {
+    try {
+      return decodeURIComponent(part);
+    } catch (_) {
+      return part;
+    }
+  }).join("/");
+  return { kind: match[1], path };
+}
+
+function encodeHashPath(path) {
+  return path.split("/").map(encodeURIComponent).join("/");
+}
+
+function setHash(hash) {
+  if (location.hash === hash || (hash === "" && !location.hash)) return;
+  state.suppressHashChange = true;
+  if (hash === "") {
+    history.pushState(null, "", location.pathname + location.search);
+    state.suppressHashChange = false;
+  } else {
+    location.hash = hash;
+  }
+}
+
+async function routeFromHash() {
+  const target = parseHash();
+  await maybeSaveBeforeNavigation();
+  if (target.kind === "doc" && target.path) {
+    await loadFile(target.path);
+  } else {
+    await loadDirectory(target.path);
+    showDocsView();
+  }
 }
 
 async function loadConfig() {
@@ -596,6 +650,7 @@ function showDocsView() {
   els.editorTopbar.hidden = true;
   els.editorView.hidden = true;
   document.title = "Branch Docs";
+  setHash(state.directory ? `#/dir/${encodeHashPath(state.directory)}` : "");
 }
 
 function showEditorView() {
@@ -804,6 +859,7 @@ async function loadFile(path) {
   setSaveState(isReadOnly() ? "Read-only" : "Saved", "saved");
   await loadDirectory(dirname(file.path));
   showEditorView();
+  setHash(`#/doc/${encodeHashPath(file.path)}`);
   connectCollab(file.path);
   if (state.historyOpen) {
     state.historySelected = null;
